@@ -2,3 +2,7 @@ flask==3.0.3
 requests==2.31.0
 beautifulsoup4==4.12.3
 lxml==5.2.2
+selenium==4.21.0
+webdriver-manager==4.0.1
+fpdf2==2.7.9
+trafilatura==1.10.0

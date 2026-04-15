@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>SENAMHI — Datos de Estaciones</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet"/>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet"/>
+  <link href="/static/css/senamhi.css" rel="stylesheet"/>
+</head>
+<body>
+
+<!-- NAVBAR -->
+<nav class="navbar navbar-dark sena-navbar">
+  <div class="container-fluid px-4">
+    <a class="navbar-brand fw-bold fs-5" href="/">
+      <i class="fas fa-spider me-2 opacity-75"></i>WebScraper Pro
+    </a>
+    <span class="sena-badge">
+      <i class="fas fa-cloud-sun-rain me-1"></i>SENAMHI Perú
+    </span>
+    <a href="/" class="btn btn-sm btn-outline-light">
+      <i class="fas fa-arrow-left me-1"></i>Volver
+    </a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="sena-hero">
+  <div class="container text-center">
+    <div class="sena-logo-wrap">
+      <i class="fas fa-cloud-sun-rain"></i>
+    </div>
+    <h1 class="sena-title">Datos Históricos SENAMHI</h1>
+    <p class="sena-subtitle">
+      Selecciona una región → elige estaciones → descarga los datos en CSV
+    </p>
+
+    <!-- Selector de región -->
+    <div class="sena-search-card">
+      <div class="row g-3 align-items-end">
+        <div class="col-md-5">
+          <label class="form-label fw-semibold text-start d-block">
+            <i class="fas fa-map-location-dot me-1 text-primary"></i>Región
+          </label>
+          <select class="form-select form-select-lg" id="selRegion">
+            <option value="">— Selecciona una región —</option>
+            {% for code, name in regions.items() %}
+            <option value="{{ code }}">{{ name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label fw-semibold text-start d-block">
+            <i class="fas fa-robot me-1 text-warning"></i>Modo
+          </label>
+          <div class="form-check form-switch mt-2">
+            <input class="form-check-input" type="checkbox" id="chkSelenium" role="switch"/>
+            <label class="form-check-label" for="chkSelenium">
+              Usar navegador (Selenium) si la página falla
+            </label>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <button class="btn btn-sena w-100" id="btnBuscar" onclick="buscarEstaciones()">
+            <i class="fas fa-search me-2"></i>Buscar estaciones
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- LOADING -->
+<div id="loadingSection" class="text-center py-5 d-none">
+  <div class="spinner-border text-primary mb-3" style="width:3rem;height:3rem;"></div>
+  <p class="text-muted" id="loadingMsg">Buscando estaciones...</p>
+</div>
+
+<!-- ERROR -->
+<div id="errorSection" class="container mt-4 d-none">
+  <div class="alert alert-danger d-flex gap-3 align-items-center">
+    <i class="fas fa-circle-exclamation fs-4"></i>
+    <div id="errorMsg"></div>
+  </div>
+</div>
+
+<!-- RESULTADOS -->
+<section id="resultsSection" class="container my-5 d-none">
+
+  <!-- Info región + acciones globales -->
+  <div class="sena-region-header mb-4">
+    <div class="d-flex flex-wrap align-items-center gap-3">
+      <div class="sena-region-icon"><i class="fas fa-map-marked-alt"></i></div>
+      <div>
+        <h2 class="mb-0 fw-bold" id="regionTitle">—</h2>
+        <p class="mb-0 text-muted small">
+          <span id="totalCount">0</span> estaciones encontradas
+          · <span id="selectedCount">0</span> seleccionadas
+        </p>
+      </div>
+      <div class="ms-auto d-flex flex-wrap gap-2">
+        <button class="btn btn-outline-secondary btn-sm" onclick="toggleAll(true)">
+          <i class="fas fa-check-double me-1"></i>Seleccionar todo
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="toggleAll(false)">
+          <i class="fas fa-xmark me-1"></i>Deseleccionar
+        </button>
+        <button class="btn btn-sena-download" id="btnDownloadAll" onclick="descargarSeleccionadas()">
+          <i class="fas fa-download me-2"></i>Descargar seleccionadas (ZIP)
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Filtro rápido -->
+  <div class="mb-3">
+    <input type="text" id="filterInput" class="form-control"
+           placeholder="🔍 Filtrar por nombre de estación..."
+           oninput="filterStations(this.value)"/>
+  </div>
+
+  <!-- Tabla de estaciones -->
+  <div class="table-responsive sena-table-wrap">
+    <table class="table table-hover sena-table" id="stationsTable">
+      <thead>
+        <tr>
+          <th width="40"><input type="checkbox" id="chkAll" onchange="toggleAll(this.checked)" class="form-check-input"/></th>
+          <th>Estación</th>
+          <th>Código</th>
+          <th>Tipo</th>
+          <th>Departamento</th>
+          <th>Altitud</th>
+          <th>Acciones</th>
+        </tr>
+      </thead>
+      <tbody id="stationsBody"></tbody>
+    </table>
+  </div>
+
+</section>
+
+<!-- MODAL: PROGRESO DESCARGA ZIP -->
+<div class="modal fade" id="progressModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0">
+        <h5 class="modal-title fw-bold">
+          <i class="fas fa-cloud-arrow-down me-2 text-primary"></i>
+          Descargando datos históricos
+        </h5>
+      </div>
+      <div class="modal-body">
+        <div class="progress mb-3" style="height:14px;border-radius:10px;">
+          <div id="dlProgressBar"
+               class="progress-bar progress-bar-striped progress-bar-animated bg-primary"
+               style="width:0%"></div>
+        </div>
+        <div class="d-flex justify-content-between mb-3">
+          <span id="dlStatusMsg" class="text-muted small">Iniciando...</span>
+          <span id="dlPercent" class="fw-bold text-primary">0%</span>
+        </div>
+
+        <!-- Estación actual -->
+        <div class="sena-current-station d-none" id="currentStationBox">
+          <i class="fas fa-satellite-dish text-primary me-2"></i>
+          <span id="currentStationName">—</span>
+        </div>
+
+        <!-- Resultado final -->
+        <div id="dlDoneSection" class="d-none text-center mt-3">
+          <div style="font-size:3rem;color:#16a34a;animation:pop .4s ease;">
+            <i class="fas fa-circle-check"></i>
+          </div>
+          <p class="fw-bold mt-2" id="dlDoneMsg">¡Listo!</p>
+          <button class="btn btn-success px-4" onclick="downloadZipFile()">
+            <i class="fas fa-download me-2"></i>Descargar ZIP
+          </button>
+        </div>
+
+        <div id="dlErrorSection" class="d-none mt-3">
+          <div class="alert alert-danger mb-0" id="dlErrorMsg"></div>
+        </div>
+      </div>
+      <div class="modal-footer border-0">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: VER DATOS INDIVIDUALES -->
+<div class="modal fade" id="stationDataModal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title fw-bold text-primary" id="stationDataTitle">Datos de estación</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div id="stationDataSpinner" class="text-center py-4">
+          <div class="spinner-border text-primary"></div>
+          <p class="mt-2 text-muted">Obteniendo datos...</p>
+        </div>
+        <div id="stationDataContent" class="d-none">
+          <div class="table-responsive" id="stationDataTable"></div>
+        </div>
+        <div id="stationDataEmpty" class="d-none text-center py-4 text-muted">
+          <i class="fas fa-database fs-1 d-block mb-2"></i>
+          No se encontraron datos tabulares para esta estación en este momento.
+          Intenta descargando el ZIP completo.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btnDownloadSingle" class="btn btn-success btn-sm d-none" onclick="downloadSingleCSV()">
+          <i class="fas fa-file-csv me-1"></i>Descargar CSV
+        </button>
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast-container position-fixed bottom-0 end-0 p-3">
+  <div id="toastMsg" class="toast text-white border-0">
+    <div class="d-flex">
+      <div class="toast-body" id="toastText"></div>
+      <button class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+
+<footer class="footer mt-5 py-3 text-center text-muted small border-top">
+  <i class="fas fa-cloud-sun-rain me-1"></i>
+  SENAMHI Perú — Datos de uso público · WebScraper Pro
+</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/senamhi.js"></script>
+</body>
+</html>
