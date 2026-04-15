@@ -7,6 +7,20 @@ let exportTaskId       = null;
 let exportPollInterval = null;
 let currentZipFilename = null;
 
+// ── Compilar PDF de noticias ──
+let compilePdfTaskId   = null;
+let compilePdfInterval = null;
+let compilePdfFilename = null;
+
+// ── ZIP de documentos ──
+let docsZipTaskId      = null;
+let docsZipInterval    = null;
+let docsZipFilename    = null;
+
+// ── News sort/data ──
+let _newsData     = [];
+let _newsSortMode = 'cat';
+
 // ─────────────────────────────────────────────
 //  UTILIDADES
 // ─────────────────────────────────────────────
@@ -35,11 +49,30 @@ function showToast(msg, type = 'success') {
 
 function resetResults() {
   ['resultsSection','errorSection','loadingSection'].forEach(hide);
-  ['newsGrid','videosGrid','tablasList','filesList','imagesGrid'].forEach(id => {
-    document.getElementById(id).innerHTML = '';
+  ['newsGrid','videosGrid','embedsGrid','tablasList','filesList','imagesGrid','audioList',
+   'linksSummaryStats','topDomainsWrap'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = '';
   });
-  ['noNewsMsg','noVideosMsg','noTablasMsg','noFilesMsg','noImagesMsg'].forEach(hide);
+  ['noNewsMsg','noVideosMsg','noTablasMsg','noFilesMsg','noImagesMsg','noAudioMsg'].forEach(hide);
+  ['embedsSection','allLinksSection','pageSummaryRow'].forEach(id => {
+    document.getElementById(id)?.classList.add('d-none');
+  });
+  document.getElementById('ogImage')?.classList.add('d-none');
   currentPdfFilename = null;
+  // Reset news state
+  _newsData     = [];
+  _newsSortMode = 'cat';
+  document.getElementById('sortBtnCat')?.classList.add('active');
+  document.getElementById('sortBtnRel')?.classList.remove('active');
+  // Reset filter count badges
+  ['Todas','Regional','Educación','Salud','Deporte','Otros'].forEach(c => {
+    const el = document.getElementById(`cnt-${c}`);
+    if (el) el.textContent = '';
+  });
+  // Reset filter buttons
+  document.querySelectorAll('.btn-filter').forEach(b => b.classList.remove('active'));
+  document.querySelector('.btn-filter[data-cat="Todas"]')?.classList.add('active');
 }
 
 // ─────────────────────────────────────────────
@@ -68,13 +101,49 @@ function catCfg(cat) { return CAT_CONFIG[cat] || CAT_CONFIG['Otros']; }
 // ─────────────────────────────────────────────
 //  RENDER NOTICIAS
 // ─────────────────────────────────────────────
+function _domainFromUrl(url) {
+  try { return new URL(url).hostname.replace(/^www\./,''); } catch { return ''; }
+}
+
 function renderNews(newsArray) {
+  _newsData = newsArray || [];
+  _doRenderNews();
+}
+
+function _doRenderNews() {
   const grid = document.getElementById('newsGrid');
-  if (!newsArray.length) { hide('newsGrid'); show('noNewsMsg'); return; }
+  grid.innerHTML = '';
+
+  if (!_newsData.length) { hide('newsGrid'); show('noNewsMsg'); return; }
   hide('noNewsMsg');
 
-  newsArray.forEach(item => {
-    const cfg = catCfg(item.category);
+  // Conteo por categoría
+  const counts = {};
+  _newsData.forEach(item => {
+    counts[item.category] = (counts[item.category] || 0) + 1;
+  });
+  counts['Todas'] = _newsData.length;
+
+  // Actualizar badges de filtro
+  Object.entries(counts).forEach(([cat, n]) => {
+    const el = document.getElementById(`cnt-${cat}`);
+    if (el) el.textContent = ` (${n})`;
+  });
+
+  // Ordenar
+  let sorted = [..._newsData];
+  if (_newsSortMode === 'cat') {
+    const ORDER = { Regional:0, Educación:1, Salud:2, Deporte:3, Otros:4 };
+    sorted.sort((a,b) => (ORDER[a.category] ?? 99) - (ORDER[b.category] ?? 99));
+  }
+  // 'rel' → original order (no sort)
+
+  // Obtener filtro activo
+  const activeCat = document.querySelector('.btn-filter.active')?.dataset?.cat || 'Todas';
+
+  sorted.forEach(item => {
+    const cfg    = catCfg(item.category);
+    const domain = _domainFromUrl(item.link);
     const imgHtml = item.image
       ? `<img class="news-card-img" src="${escapeHtml(item.image)}" alt="${escapeHtml(item.title)}"
               loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'news-card-img-placeholder\\'><i class=\\'fas fa-newspaper\\'></i></div>'" />`
@@ -83,10 +152,13 @@ function renderNews(newsArray) {
     const col = document.createElement('div');
     col.className = 'col-12 col-sm-6 col-lg-4 col-xl-3 news-item';
     col.dataset.category = item.category;
+    if (activeCat !== 'Todas' && item.category !== activeCat) col.style.display = 'none';
+
     col.innerHTML = `
       <div class="news-card" onclick="openArticle('${escapeHtml(item.link)}','${escapeHtml(item.title)}')">
         ${imgHtml}
         <div class="news-card-body">
+          ${domain ? `<div class="news-domain-badge">${escapeHtml(domain)}</div>` : ''}
           <span class="news-category-badge ${cfg.badge}">
             <i class="fas ${cfg.icon} me-1"></i>${item.category}
           </span>
@@ -104,6 +176,162 @@ function renderNews(newsArray) {
       </div>`;
     grid.appendChild(col);
   });
+}
+
+function toggleNewsSort(mode, btn) {
+  _newsSortMode = mode;
+  document.querySelectorAll('.btn-sort-news').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  _doRenderNews();
+}
+
+// ─────────────────────────────────────────────
+//  COMPILAR NOTICIAS EN PDF
+// ─────────────────────────────────────────────
+async function compileNewsPDF() {
+  if (!_newsData.length) { showToast('No hay noticias para compilar.', 'warning'); return; }
+  compilePdfFilename = null;
+
+  // Reset modal
+  document.getElementById('compilePdfBar').style.width  = '0%';
+  document.getElementById('compilePdfBar').className    = 'progress-bar progress-bar-striped progress-bar-animated bg-danger';
+  document.getElementById('compilePdfPct').textContent  = '0%';
+  document.getElementById('compilePdfMsg').textContent  = 'Iniciando...';
+  document.getElementById('compilePdfDone').classList.add('d-none');
+  document.getElementById('compilePdfError').classList.add('d-none');
+
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('compilePdfModal')).show();
+
+  try {
+    const res  = await fetch('/compile-news', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ news: _newsData, title: scrapedData?.title || 'Noticias' }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    compilePdfTaskId = data.task_id;
+    compilePdfInterval = setInterval(pollCompilePdfStatus, 1500);
+  } catch (err) {
+    document.getElementById('compilePdfErrorMsg').textContent = 'Error al iniciar: ' + err.message;
+    document.getElementById('compilePdfError').classList.remove('d-none');
+  }
+}
+
+async function pollCompilePdfStatus() {
+  if (!compilePdfTaskId) return;
+  try {
+    const res  = await fetch(`/compile-status/${compilePdfTaskId}`);
+    const task = await res.json();
+    const pct  = task.progress || 0;
+
+    document.getElementById('compilePdfBar').style.width = pct + '%';
+    document.getElementById('compilePdfPct').textContent = pct + '%';
+    document.getElementById('compilePdfMsg').textContent = task.msg || '';
+
+    if (task.status === 'done') {
+      clearInterval(compilePdfInterval);
+      compilePdfFilename = task.filename;
+      document.getElementById('compilePdfBar').classList.remove('bg-danger','progress-bar-animated');
+      document.getElementById('compilePdfBar').classList.add('bg-success');
+      document.getElementById('compilePdfBar').style.width = '100%';
+      document.getElementById('compilePdfPct').textContent = '100%';
+      document.getElementById('compilePdfDoneMsg').textContent = task.msg;
+      document.getElementById('compilePdfDone').classList.remove('d-none');
+      showToast('¡PDF compilado listo!', 'success');
+    }
+    if (task.status === 'error') {
+      clearInterval(compilePdfInterval);
+      document.getElementById('compilePdfErrorMsg').textContent = task.msg;
+      document.getElementById('compilePdfError').classList.remove('d-none');
+    }
+  } catch (err) {
+    clearInterval(compilePdfInterval);
+    document.getElementById('compilePdfErrorMsg').textContent = 'Error de conexión: ' + err.message;
+    document.getElementById('compilePdfError').classList.remove('d-none');
+  }
+}
+
+function downloadCompilePdf() {
+  if (!compilePdfFilename) return;
+  const a = document.createElement('a');
+  a.href = `/download-file/${encodeURIComponent(compilePdfFilename)}`;
+  a.download = compilePdfFilename;
+  document.body.appendChild(a); a.click(); a.remove();
+  showToast('PDF compilado descargado.', 'success');
+}
+
+// ─────────────────────────────────────────────
+//  ZIP DE DOCUMENTOS
+// ─────────────────────────────────────────────
+async function startDocsZip() {
+  if (!scrapedData?.files?.length) { showToast('No hay documentos para descargar.', 'warning'); return; }
+  docsZipFilename = null;
+
+  document.getElementById('docsZipBar').style.width  = '0%';
+  document.getElementById('docsZipBar').className    = 'progress-bar progress-bar-striped progress-bar-animated bg-info';
+  document.getElementById('docsZipPct').textContent  = '0%';
+  document.getElementById('docsZipMsg').textContent  = 'Iniciando...';
+  document.getElementById('docsZipDone').classList.add('d-none');
+  document.getElementById('docsZipError').classList.add('d-none');
+
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('docsZipModal')).show();
+
+  try {
+    const res  = await fetch('/docs-zip', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ files: scrapedData.files, title: scrapedData?.title || 'Documentos' }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    docsZipTaskId = data.task_id;
+    docsZipInterval = setInterval(pollDocsZipStatus, 1500);
+  } catch (err) {
+    document.getElementById('docsZipErrorMsg').textContent = 'Error al iniciar: ' + err.message;
+    document.getElementById('docsZipError').classList.remove('d-none');
+  }
+}
+
+async function pollDocsZipStatus() {
+  if (!docsZipTaskId) return;
+  try {
+    const res  = await fetch(`/docs-zip-status/${docsZipTaskId}`);
+    const task = await res.json();
+    const pct  = task.progress || 0;
+
+    document.getElementById('docsZipBar').style.width = pct + '%';
+    document.getElementById('docsZipPct').textContent = pct + '%';
+    document.getElementById('docsZipMsg').textContent = task.msg || '';
+
+    if (task.status === 'done') {
+      clearInterval(docsZipInterval);
+      docsZipFilename = task.filename;
+      document.getElementById('docsZipBar').classList.remove('bg-info','progress-bar-animated');
+      document.getElementById('docsZipBar').classList.add('bg-success');
+      document.getElementById('docsZipBar').style.width = '100%';
+      document.getElementById('docsZipPct').textContent = '100%';
+      document.getElementById('docsZipDoneMsg').textContent = task.msg;
+      document.getElementById('docsZipDone').classList.remove('d-none');
+      showToast('¡ZIP de documentos listo!', 'success');
+    }
+    if (task.status === 'error') {
+      clearInterval(docsZipInterval);
+      document.getElementById('docsZipErrorMsg').textContent = task.msg;
+      document.getElementById('docsZipError').classList.remove('d-none');
+    }
+  } catch (err) {
+    clearInterval(docsZipInterval);
+    document.getElementById('docsZipErrorMsg').textContent = 'Error de conexión: ' + err.message;
+    document.getElementById('docsZipError').classList.remove('d-none');
+  }
+}
+
+function downloadDocsZip() {
+  if (!docsZipFilename) return;
+  const a = document.createElement('a');
+  a.href = `/download-file/${encodeURIComponent(docsZipFilename)}`;
+  a.download = docsZipFilename;
+  document.body.appendChild(a); a.click(); a.remove();
+  showToast('ZIP de documentos descargado.', 'success');
 }
 
 // ─────────────────────────────────────────────
@@ -125,11 +353,15 @@ async function openArticle(url, title) {
   modal.show();
 
   try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 30000);
     const res  = await fetch('/article', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url, title }),
+      signal: ctrl.signal,
     });
+    clearTimeout(t);
     const data = await res.json();
     hide('articleModalSpinner');
 
@@ -290,8 +522,21 @@ function expandTable(idx) {
 const FILE_ICON_CLASS = {
   PDF:'fi-pdf', DOC:'fi-doc', DOCX:'fi-doc', XLS:'fi-xls', XLSX:'fi-xls',
   PPT:'fi-ppt', PPTX:'fi-pptx', ZIP:'fi-zip', RAR:'fi-rar',
-  CSV:'fi-csv', JSON:'fi-json',
+  CSV:'fi-csv', JSON:'fi-json', TXT:'fi-txt', KML:'fi-kml',
+  MP4:'fi-video', AVI:'fi-video', MOV:'fi-video', MKV:'fi-video',
+  MP3:'fi-audio', WAV:'fi-audio', OGG:'fi-audio',
 };
+
+function formatFileSize(bytes) {
+  if (!bytes) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB';
+  return (bytes/1048576).toFixed(1) + ' MB';
+}
+
+function trackDirectDownload(url, filename) {
+  showToast(`Descargando "${filename}" directamente…`, 'info');
+}
 
 function renderFiles(files) {
   const list = document.getElementById('filesList');
@@ -299,13 +544,14 @@ function renderFiles(files) {
   hide('noFilesMsg');
 
   files.forEach(file => {
-    const iconCls = FILE_ICON_CLASS[file.type] || 'fi-default';
+    const iconCls  = FILE_ICON_CLASS[file.type] || 'fi-default';
+    const sizeText = file.size ? `<span class="text-muted small ms-2">${formatFileSize(file.size)}</span>` : '';
     const div = document.createElement('div');
     div.className = 'file-item';
     div.innerHTML = `
       <div class="file-icon ${iconCls}">${file.type}</div>
       <div class="file-info">
-        <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+        <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}${sizeText}</div>
         <div class="file-type-label">
           <i class="fas fa-tag me-1"></i>${file.type}
           &nbsp;·&nbsp;
@@ -314,9 +560,16 @@ function renderFiles(files) {
           </a>
         </div>
       </div>
-      <button class="btn-download" onclick="downloadFile('${escapeHtml(file.url)}','${escapeHtml(file.filename)}',this)">
-        <i class="fas fa-download me-1"></i>Descargar
-      </button>`;
+      <div class="d-flex gap-2 align-items-center flex-shrink-0">
+        <a href="${escapeHtml(file.url)}" download="${escapeHtml(file.filename)}"
+           class="btn-dl-direct" target="_blank" rel="noopener"
+           onclick="trackDirectDownload('${escapeHtml(file.url)}','${escapeHtml(file.filename)}')">
+          <i class="fas fa-link"></i>Directo
+        </a>
+        <button class="btn-download" onclick="downloadFile('${escapeHtml(file.url)}','${escapeHtml(file.filename)}',this)">
+          <i class="fas fa-download me-1"></i>Proxy
+        </button>
+      </div>`;
     list.appendChild(div);
   });
 }
@@ -347,24 +600,60 @@ async function downloadFile(url, filename, btn) {
 }
 
 // ─────────────────────────────────────────────
-//  RENDER IMÁGENES
+//  RENDER IMÁGENES (con carga progresiva)
 // ─────────────────────────────────────────────
+let _allImages   = [];
+let _imgsShown   = 0;
+const IMGS_BATCH = 60;
+
 function renderImages(images) {
+  _allImages = images;
+  _imgsShown = 0;
   const grid = document.getElementById('imagesGrid');
+  // Eliminar botón previo si existe
+  document.getElementById('loadMoreImgsBtn')?.remove();
+
   if (!images.length) { show('noImagesMsg'); return; }
   hide('noImagesMsg');
 
-  images.forEach(img => {
+  // Actualizar badge con total real
+  document.getElementById('statImages').textContent  = images.length;
+  document.getElementById('badgeImagenes').textContent = images.length;
+
+  _renderImageBatch(grid);
+}
+
+function _renderImageBatch(grid) {
+  const batch = _allImages.slice(_imgsShown, _imgsShown + IMGS_BATCH);
+  batch.forEach(img => {
     const col = document.createElement('div');
     col.className = 'col-6 col-sm-4 col-md-3 col-xl-2';
     col.innerHTML = `
       <div class="img-card" onclick="openImageModal('${escapeHtml(img.url)}','${escapeHtml(img.alt||img.filename)}')">
         <img src="${escapeHtml(img.url)}" alt="${escapeHtml(img.alt||img.filename)}"
-             loading="lazy" onerror="this.closest('[class^=col]').remove()" />
-        <div class="img-card-caption">${escapeHtml(img.alt||img.filename)}</div>
+             loading="lazy" onerror="this.closest('.col-6, .col-sm-4').remove()" />
+        <div class="img-card-caption">${escapeHtml(img.alt||img.filename||'imagen')}</div>
       </div>`;
     grid.appendChild(col);
   });
+  _imgsShown += batch.length;
+
+  // Eliminar botón viejo
+  document.getElementById('loadMoreImgsBtn')?.remove();
+
+  // Añadir botón "Cargar más" si quedan imágenes
+  if (_imgsShown < _allImages.length) {
+    const remaining = _allImages.length - _imgsShown;
+    const btn = document.createElement('div');
+    btn.id = 'loadMoreImgsBtn';
+    btn.className = 'col-12 text-center mt-3';
+    btn.innerHTML = `
+      <button class="btn btn-outline-primary px-4" onclick="_renderImageBatch(document.getElementById('imagesGrid'))">
+        <i class="fas fa-images me-2"></i>Cargar ${Math.min(remaining, IMGS_BATCH)} más
+        <span class="badge bg-primary ms-2">${remaining} restantes</span>
+      </button>`;
+    grid.appendChild(btn);
+  }
 }
 
 function openImageModal(url, alt) {
@@ -374,6 +663,172 @@ function openImageModal(url, alt) {
   document.getElementById('imgModalDL').href = url;
   document.getElementById('imgModalDL').download = alt || 'imagen';
   bootstrap.Modal.getOrCreateInstance(document.getElementById('imgModal')).show();
+}
+
+// ─────────────────────────────────────────────
+//  RESUMEN DE PÁGINA (tipo, autor, fecha, og)
+// ─────────────────────────────────────────────
+const PAGE_TYPE_COLORS = {
+  'Noticias':'#2563eb','Blog':'#7c3aed','Gobierno':'#dc2626',
+  'Académico':'#0891b2','Wiki':'#16a34a','Comercio':'#ea580c',
+  'Red Social':'#db2777','Portal':'#64748b','Otro':'#94a3b8',
+};
+
+function renderPageSummary(data) {
+  const meta  = data.metadata || {};
+  const ptype = data.page_type || 'Otro';
+  const row   = document.getElementById('pageSummaryRow');
+
+  // Badge tipo de página
+  const badge = document.getElementById('pageTypeBadge');
+  badge.textContent = ptype;
+  badge.style.background = PAGE_TYPE_COLORS[ptype] || '#94a3b8';
+
+  // og:image
+  if (meta.og_image) {
+    const img = document.getElementById('ogImage');
+    img.src = meta.og_image;
+    img.classList.remove('d-none');
+    img.onerror = () => img.classList.add('d-none');
+  }
+
+  // site_name
+  const siteNameEl = document.getElementById('pageSiteName');
+  siteNameEl.textContent = meta.site_name || '';
+
+  // Autor
+  if (meta.author) {
+    document.getElementById('pageAuthorText').textContent = meta.author;
+    document.getElementById('pageAuthor').classList.remove('d-none');
+  }
+
+  // Fecha
+  if (meta.published_date) {
+    document.getElementById('pagePublishedDateText').textContent = meta.published_date;
+    document.getElementById('pagePublishedDate').classList.remove('d-none');
+  }
+
+  // Idioma
+  if (meta.language) {
+    document.getElementById('pageLanguageText').textContent = meta.language.toUpperCase();
+    document.getElementById('pageLanguage').classList.remove('d-none');
+  }
+
+  row.classList.remove('d-none');
+}
+
+// ─────────────────────────────────────────────
+//  EMBEDS (YouTube, Vimeo, Twitter, etc.)
+// ─────────────────────────────────────────────
+const EMBED_COLORS = {
+  youtube:'#ff0000', vimeo:'#1ab7ea', twitter:'#1da1f2', instagram:'#e1306c',
+  tiktok:'#010101', facebook:'#1877f2', maps:'#34a853', spotify:'#1db954',
+  dailymotion:'#f7821b', twitch:'#9146ff', soundcloud:'#ff5500',
+};
+
+function renderEmbeds(embeds) {
+  const grid    = document.getElementById('embedsGrid');
+  const section = document.getElementById('embedsSection');
+  const badge   = document.getElementById('badgeEmbeds');
+  badge.textContent = embeds.length;
+  document.getElementById('statEmbeds').textContent = embeds.length;
+  if (!embeds.length) return;
+  section.classList.remove('d-none');
+  hide('noVideosMsg');
+
+  embeds.forEach(e => {
+    const color = EMBED_COLORS[e.type] || '#6b7280';
+    const thumb = e.thumbnail
+      ? `<img src="${escapeHtml(e.thumbnail)}" alt="${escapeHtml(e.title)}" class="embed-thumb"
+             loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'embed-thumb-ph\\'style=\\'background:${color}22\\'><i class=\\'fas fa-play-circle\\'style=\\'color:${color}\\'></i></div>'"/>`
+      : `<div class="embed-thumb-ph" style="background:${color}22"><i class="fas fa-play-circle" style="color:${color};font-size:2.5rem"></i></div>`;
+
+    const col = document.createElement('div');
+    col.className = 'col-12 col-sm-6 col-md-4';
+    col.innerHTML = `
+      <div class="embed-card" onclick="openVideo('${escapeHtml(e.url)}','${escapeHtml(e.title)}')">
+        ${thumb}
+        <span class="embed-type-badge" style="background:${color}">${escapeHtml(e.type)}</span>
+        <div class="embed-title">${escapeHtml(e.title)}</div>
+      </div>`;
+    grid.appendChild(col);
+  });
+}
+
+// ─────────────────────────────────────────────
+//  AUDIO
+// ─────────────────────────────────────────────
+function renderAudio(audioList) {
+  const list  = document.getElementById('audioList');
+  const badge = document.getElementById('badgeAudio');
+  badge.textContent = audioList.length;
+  document.getElementById('statAudio').textContent = audioList.length;
+  if (!audioList.length) { show('noAudioMsg'); return; }
+  hide('noAudioMsg');
+
+  const ICONS = { html5:'fa-volume-high', direct:'fa-file-audio', rss:'fa-rss', soundcloud:'fa-cloud' };
+  audioList.forEach(item => {
+    const icon = ICONS[item.type] || 'fa-music';
+    const isPlayable = item.type === 'html5' || item.type === 'direct';
+    const playerHtml = isPlayable
+      ? `<audio controls class="w-100 mt-2" style="height:34px;" preload="none">
+           <source src="${escapeHtml(item.url)}" />
+         </audio>`
+      : `<a href="${escapeHtml(item.url)}" target="_blank" rel="noopener"
+            class="btn btn-sm btn-outline-primary mt-2">
+           <i class="fas fa-external-link-alt me-1"></i>Abrir enlace
+         </a>`;
+
+    const div = document.createElement('div');
+    div.className = 'audio-item';
+    div.innerHTML = `
+      <div class="audio-icon"><i class="fas ${icon}"></i></div>
+      <div class="flex-grow-1" style="min-width:0">
+        <div class="audio-title">${escapeHtml(item.title)}</div>
+        <div class="audio-type text-muted">${escapeHtml(item.type.toUpperCase())}</div>
+        ${playerHtml}
+      </div>`;
+    list.appendChild(div);
+  });
+}
+
+// ─────────────────────────────────────────────
+//  ANÁLISIS DE ENLACES
+// ─────────────────────────────────────────────
+function renderAllLinks(allLinks) {
+  if (!allLinks || allLinks.total === 0) return;
+  const section = document.getElementById('allLinksSection');
+  section.classList.remove('d-none');
+  document.getElementById('statLinks').textContent = allLinks.total;
+  document.getElementById('allLinksLabel').textContent =
+    `Análisis de enlaces · ${allLinks.total} total`;
+
+  const stats = document.getElementById('linksSummaryStats');
+  stats.innerHTML = `
+    <div class="links-stat">
+      <div class="n text-primary">${allLinks.internal}</div>
+      <div class="l"><i class="fas fa-house me-1"></i>Internos</div>
+    </div>
+    <div class="links-stat">
+      <div class="n text-success">${allLinks.external}</div>
+      <div class="l"><i class="fas fa-external-link-alt me-1"></i>Externos</div>
+    </div>
+    <div class="links-stat">
+      <div class="n text-secondary">${allLinks.total}</div>
+      <div class="l"><i class="fas fa-link me-1"></i>Total</div>
+    </div>`;
+
+  if (!allLinks.top_domains?.length) return;
+  const rows = allLinks.top_domains.map(d =>
+    `<tr><td>${escapeHtml(d.domain)}</td>
+         <td class="text-end"><span class="badge bg-secondary">${d.count}</span></td></tr>`
+  ).join('');
+  document.getElementById('topDomainsWrap').innerHTML = `
+    <p class="fw-semibold small text-muted mt-3 mb-1">Top dominios externos:</p>
+    <table class="top-domains-table">
+      <thead><tr><th>Dominio</th><th class="text-end">Links</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
 }
 
 // ─────────────────────────────────────────────
@@ -455,21 +910,29 @@ async function analyze() {
 
     scrapedData = data;   // ← guardar para export ZIP
 
-    renderNews(data.news    || []);
+    renderNews(data.news      || []);
     renderVideos(data.videos  || []);
+    renderEmbeds(data.embeds  || []);
     renderTables(data.tables  || []);
-    renderFiles(data.files   || []);
+    renderFiles(data.files    || []);
     renderImages(data.images  || []);
+    renderAudio(data.audio    || []);
+    renderAllLinks(data.all_links || {});
+    renderPageSummary(data);
+
+    // Stats nuevos
+    document.getElementById('statLinks').textContent  = data.stats?.links_total  || 0;
 
     show('resultsSection');
     document.getElementById('resultsSection').scrollIntoView({ behavior:'smooth', block:'start' });
 
     // Resaltar tab con más contenido
     const counts = [
-      { id:'tabNoticias', n: data.stats.news_count },
-      { id:'tabVideos',   n: data.stats.videos_count },
-      { id:'tabTablas',   n: data.stats.tables_count },
-      { id:'tabArchivos', n: data.stats.files_count },
+      { id:'tabNoticias', n: data.stats.news_count    || 0 },
+      { id:'tabVideos',   n: (data.stats.videos_count || 0) + (data.stats.embeds_count || 0) },
+      { id:'tabTablas',   n: data.stats.tables_count  || 0 },
+      { id:'tabArchivos', n: data.stats.files_count   || 0 },
+      { id:'tabAudio',    n: data.stats.audio_count   || 0 },
     ];
     const best = counts.reduce((a,b) => b.n > a.n ? b : a, counts[0]);
     if (best.n > 0) {

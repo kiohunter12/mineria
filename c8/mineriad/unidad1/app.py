@@ -1,6 +1,8 @@
 from flask import Flask, render_template, request, jsonify, send_file, abort
 from scraper import (scrape_url, download_file, scrape_full_article,
-                     article_to_pdf, start_export, TASKS, DOWNLOAD_DIR)
+                     article_to_pdf, start_export, TASKS, DOWNLOAD_DIR,
+                     PDF_TASKS, start_compile_news,
+                     DOC_ZIP_TASKS, start_docs_zip)
 from senamhi import (get_stations, start_senamhi_task,
                      SENAMHI_TASKS, REGIONS)
 from pathlib import Path
@@ -76,21 +78,26 @@ def scrape():
 
 @app.route('/article', methods=['POST'])
 def get_article():
-    data = request.get_json()
-    if not data or 'url' not in data:
-        return jsonify({'error': 'URL requerida'}), 400
-    url   = data['url'].strip()
-    title = data.get('title', 'articulo')
-    content = scrape_full_article(url)
-    safe_title = re.sub(r'[^\w\s]', '', title)[:50].strip().replace(' ', '_') or 'articulo'
-    pdf_path, pdf_filename = article_to_pdf(title, content, url, f'noticia_{safe_title}')
-    return jsonify({
-        'title':        title,
-        'content':      content,
-        'url':          url,
-        'pdf_filename': pdf_filename if pdf_path else None,
-        'pdf_error':    pdf_filename if not pdf_path else None,
-    })
+    try:
+        data = request.get_json()
+        if not data or 'url' not in data:
+            return jsonify({'error': 'URL requerida'}), 400
+        url   = data['url'].strip()
+        if not url:
+            return jsonify({'error': 'URL vacía'}), 400
+        title = data.get('title', 'articulo')
+        content = scrape_full_article(url)
+        safe_title = re.sub(r'[^\w\s]', '', title)[:50].strip().replace(' ', '_') or 'articulo'
+        pdf_path, pdf_filename = article_to_pdf(title, content, url, f'noticia_{safe_title}')
+        return jsonify({
+            'title':        title,
+            'content':      content,
+            'url':          url,
+            'pdf_filename': pdf_filename if pdf_path else None,
+            'pdf_error':    pdf_filename if not pdf_path else None,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e), 'content': 'Error interno al procesar el artículo.'}), 200
 
 
 @app.route('/download', methods=['POST'])
@@ -121,6 +128,40 @@ def start_export_route():
 @app.route('/export-status/<task_id>')
 def export_status(task_id):
     task = TASKS.get(task_id)
+    if not task:
+        return jsonify({'error': 'Tarea no encontrada'}), 404
+    return jsonify(task)
+
+
+@app.route('/compile-news', methods=['POST'])
+def compile_news():
+    data = request.get_json()
+    if not data or not data.get('news'):
+        return jsonify({'error': 'Lista de noticias requerida'}), 400
+    task_id = start_compile_news(data['news'], data.get('title', 'Noticias'))
+    return jsonify({'task_id': task_id})
+
+
+@app.route('/compile-status/<task_id>')
+def compile_status(task_id):
+    task = PDF_TASKS.get(task_id)
+    if not task:
+        return jsonify({'error': 'Tarea no encontrada'}), 404
+    return jsonify(task)
+
+
+@app.route('/docs-zip', methods=['POST'])
+def docs_zip():
+    data = request.get_json()
+    if not data or not data.get('files'):
+        return jsonify({'error': 'Lista de archivos requerida'}), 400
+    task_id = start_docs_zip(data['files'], data.get('title', 'Documentos'))
+    return jsonify({'task_id': task_id})
+
+
+@app.route('/docs-zip-status/<task_id>')
+def docs_zip_status(task_id):
+    task = DOC_ZIP_TASKS.get(task_id)
     if not task:
         return jsonify({'error': 'Tarea no encontrada'}), 404
     return jsonify(task)

@@ -12,7 +12,9 @@ from datetime import datetime
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-TASKS = {}   # exportaciones en background
+TASKS        = {}   # exportaciones ZIP en background
+PDF_TASKS    = {}   # compilaciones de noticias en PDF
+DOC_ZIP_TASKS = {}  # ZIP de documentos en background
 
 HEADERS = {
     "User-Agent": (
@@ -45,8 +47,41 @@ CATEGORIES = {
 
 FILE_EXTENSIONS = [
     ".pdf",".doc",".docx",".xls",".xlsx",".ppt",".pptx",
-    ".zip",".rar",".7z",".txt",".csv",".json",".xml",".geojson"
+    ".zip",".rar",".7z",".txt",".csv",".json",".xml",".geojson",
+    ".mp4",".avi",".mkv",".mov",".mp3",".wav",".ogg",".m4a",".aac",
+    ".epub",".kml",".shp",".dwg",".sql",
 ]
+
+EMBED_PLATFORMS = [
+    ("youtube",    [r"youtube\.com/embed/", r"youtu\.be/"]),
+    ("vimeo",      [r"vimeo\.com/video/", r"player\.vimeo\.com"]),
+    ("twitter",    [r"platform\.twitter\.com", r"twitframe\.com", r"x\.com/", r"twitter\.com/widgets"]),
+    ("instagram",  [r"instagram\.com/embed", r"instagram\.com/p/"]),
+    ("tiktok",     [r"tiktok\.com/embed", r"vm\.tiktok\.com"]),
+    ("facebook",   [r"facebook\.com/plugins", r"fb\.com/"]),
+    ("maps",       [r"maps\.google\.com", r"google\.com/maps/embed"]),
+    ("spotify",    [r"open\.spotify\.com/embed"]),
+    ("dailymotion",[r"dailymotion\.com/embed"]),
+    ("twitch",     [r"player\.twitch\.tv"]),
+    ("soundcloud", [r"w\.soundcloud\.com/player"]),
+]
+
+PAGE_TYPE_SIGNALS = {
+    "Noticias":  ["article","noticia","news","redaccion","editorial","breaking",
+                  "headline","periodico","diario","reportaje","journalist"],
+    "Blog":      ["blog","post","author","entry","permalink","comments",
+                  "disqus","wordpress","blogger","tag"],
+    "Gobierno":  ["gob.pe","gob.ar","gov.","ministerio","gobierno","municipalidad",
+                  "alcaldia","decreto","resolucion","transparencia","licitacion"],
+    "Académico": ["universidad","repositorio","doi.org","scholar","investigacion",
+                  "tesis","facultad","academic","scielo","redalyc","journal","paper"],
+    "Wiki":      ["wiki","wikipedia","fandom","mediawiki","editar","historial","discusion"],
+    "Comercio":  ["tienda","shop","store","carrito","comprar","precio","producto",
+                  "checkout","cart","oferta","descuento","envio gratis","amazon"],
+    "Red Social":["facebook","twitter","instagram","tiktok","reddit","linkedin",
+                  "perfil","seguir","timeline","like","repost"],
+    "Portal":    ["portal","inicio","bienvenido","directorio","categorias","secciones"],
+}
 
 SKIP_IMG = ["icon","logo","pixel","tracking","1x1","spacer",
             "blank","transparent","sprite","avatar","badge","button"]
@@ -272,25 +307,153 @@ def extract_files(soup, base):
             name = a.get_text(strip=True) or os.path.basename(urlparse(fu).path) or "Archivo"
             fname = os.path.basename(urlparse(fu).path) or f"archivo{ext}"
             files.append({"name":name[:120],"url":fu,
-                          "type":ext[1:].upper(),"filename":fname})
-    return files[:25]
+                          "type":ext[1:].upper(),"filename":fname,"size":None})
+    return files[:200]
+
+
+def _best_from_srcset(srcset_str):
+    """Del valor srcset elige la URL de mayor resolución (último candidato por ancho)."""
+    if not srcset_str:
+        return ""
+    candidates = []
+    for part in srcset_str.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        tokens = part.split()
+        if tokens:
+            url = tokens[0]
+            # descriptor puede ser "800w" o "2x"; extraer número
+            w = 0
+            if len(tokens) > 1:
+                desc = tokens[1].lower()
+                try:
+                    w = float(re.sub(r"[^\d.]", "", desc))
+                    if desc.endswith("x"):
+                        w *= 1000   # convertir densidad a "pseudo-ancho"
+                except ValueError:
+                    pass
+            candidates.append((w, url))
+    if not candidates:
+        return ""
+    # elegir la de mayor ancho/densidad
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+# Todos los atributos lazy-load conocidos (orden de preferencia)
+IMG_SRC_ATTRS = [
+    "src", "data-src", "data-lazy-src", "data-original",
+    "data-img-src", "data-image", "data-lazy", "data-echo",
+    "data-srcset", "srcset", "data-src-desktop", "data-src-mobile",
+    "data-hi-res-src", "data-retina-src", "data-full-src",
+    "data-bg", "data-background", "data-cover",
+    "data-thumb", "data-photo",
+]
+
+
+def extract_images_from_raw(html, base):
+    """Extrae URLs de imagen del HTML crudo (captura URLs en JS inline, JSON, etc.)."""
+    images, seen = [], set()
+    pattern = re.compile(
+        r'https?://[^\s"\'<>{}\[\]\\]+?'
+        r'\.(?:jpg|jpeg|png|webp|gif|bmp|tiff|avif|svg)'
+        r'(?:\?[^\s"\'<>]*)?',
+        re.IGNORECASE
+    )
+    for url in pattern.findall(html):
+        url = url.rstrip(".,);'\"")
+        if url in seen:
+            continue
+        fu = abs_url(base, url) or url
+        fu_lower = fu.lower()
+        if any(p in fu_lower for p in SKIP_IMG):
+            continue
+        fname = os.path.basename(urlparse(fu).path) or "imagen.jpg"
+        seen.add(url)
+        images.append({"url": fu, "alt": "", "filename": fname, "source": "raw-html"})
+    return images, seen
 
 
 def extract_images(soup, base):
+    """Extrae TODAS las imágenes: <img>, <picture><source>, srcset completo, lazy-load."""
     images, seen = [], set()
-    for img in soup.find_all("img"):
-        src = (img.get("src") or img.get("data-src") or
-               img.get("data-lazy-src") or img.get("data-original") or
-               img.get("data-srcset","").split()[0])
-        if not src: continue
-        fu = abs_url(base, src)
-        if not fu or fu in seen: continue
-        if any(p in fu.lower() for p in SKIP_IMG): continue
-        alt = img.get("alt","").strip()
-        fname = os.path.basename(urlparse(fu).path) or "imagen.jpg"
+
+    def add_img(url_raw, alt="", source="img"):
+        if not url_raw:
+            return
+        fu = abs_url(base, url_raw.strip())
+        if not fu or fu in seen:
+            return
+        fu_lower = fu.lower()
+        if any(p in fu_lower for p in SKIP_IMG):
+            return
+        # Ignorar GIFs de 1px y SVGs de UI
+        path = urlparse(fu).path.lower()
+        if path.endswith(".gif") and any(x in fu_lower for x in ["tracker","pixel","beacon"]):
+            return
+        ext = os.path.splitext(path)[1]
+        if not ext:
+            ext = ".jpg"
+        fname = os.path.basename(path) or f"imagen{ext}"
         seen.add(fu)
-        images.append({"url":fu,"alt":alt,"filename":fname})
-    return images[:40]
+        images.append({"url": fu, "alt": alt.strip(), "filename": fname, "source": source})
+
+    # ── 1. Etiquetas <img> con todos los atributos posibles ──
+    for img in soup.find_all("img"):
+        alt = img.get("alt", "")
+        chosen = None
+        # Intentar srcset primero (mejor calidad)
+        for attr in ("srcset", "data-srcset"):
+            val = img.get(attr, "").strip()
+            if val:
+                chosen = _best_from_srcset(val)
+                break
+        # Luego atributos simples
+        if not chosen:
+            for attr in IMG_SRC_ATTRS:
+                if attr in ("srcset", "data-srcset"):
+                    continue
+                val = img.get(attr, "").strip()
+                if val and not val.startswith("data:"):
+                    chosen = val
+                    break
+        add_img(chosen, alt, "img")
+
+    # ── 2. <picture><source srcset> ──
+    for picture in soup.find_all("picture"):
+        alt = ""
+        img_tag = picture.find("img")
+        if img_tag:
+            alt = img_tag.get("alt", "")
+        for source in picture.find_all("source"):
+            for attr in ("srcset", "data-srcset"):
+                val = source.get(attr, "").strip()
+                if val:
+                    best = _best_from_srcset(val)
+                    if best:
+                        add_img(best, alt, "picture")
+                    break
+
+    # ── 3. Atributos style con background-image ──
+    for tag in soup.find_all(style=True):
+        m = re.search(r'background(?:-image)?\s*:\s*url\(["\']?([^"\')\s]+)["\']?\)', tag["style"])
+        if m:
+            add_img(m.group(1), tag.get("alt",""), "bg-style")
+
+    # ── 4. data-bg / data-background en cualquier elemento ──
+    for tag in soup.find_all(attrs={"data-bg": True}):
+        add_img(tag["data-bg"], "", "data-bg")
+    for tag in soup.find_all(attrs={"data-background": True}):
+        add_img(tag["data-background"], "", "data-background")
+
+    # ── 5. Open Graph image (si no está ya) ──
+    for meta in soup.find_all("meta", attrs={"property": re.compile(r"og:image", re.I)}):
+        add_img(meta.get("content",""), "og:image", "og")
+    for meta in soup.find_all("meta", attrs={"name": re.compile(r"twitter:image", re.I)}):
+        add_img(meta.get("content",""), "twitter:image", "og")
+
+    return images   # SIN límite — devolver todas
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -429,6 +592,199 @@ def article_to_pdf(title, content, url, filename):
 
 
 # ─────────────────────────────────────────────────────────────────
+#  NUEVOS EXTRACTORES — análisis profundo
+# ─────────────────────────────────────────────────────────────────
+
+def extract_metadata(soup, base_url):
+    """Extrae metadatos Open Graph, Twitter Cards, JSON-LD y meta tags."""
+    def og(prop):
+        t = soup.find("meta", attrs={"property": prop})
+        return t["content"].strip() if t and t.get("content") else None
+
+    def meta_name(name):
+        t = soup.find("meta", attrs={"name": name})
+        return t["content"].strip() if t and t.get("content") else None
+
+    title       = og("og:title") or (soup.find("title").get_text(strip=True) if soup.find("title") else None)
+    og_image    = og("og:image")
+    og_type     = og("og:type")
+    site_name   = og("og:site_name")
+    description = og("og:description") or meta_name("description")
+    author      = og("article:author") or meta_name("author")
+    keywords    = meta_name("keywords")
+
+    if not og_image:
+        t = soup.find("meta", attrs={"name": "twitter:image"})
+        og_image = t["content"].strip() if t and t.get("content") else None
+    if not author:
+        t = soup.find("meta", attrs={"name": "twitter:creator"})
+        author = t["content"].strip() if t and t.get("content") else None
+
+    # Fecha publicación: <time>, article:published_time, JSON-LD
+    published_date = None
+    time_tag = soup.find("time", attrs={"datetime": True})
+    if time_tag:
+        published_date = time_tag["datetime"][:10]
+    if not published_date:
+        t = soup.find("meta", attrs={"property": "article:published_time"})
+        if t and t.get("content"):
+            published_date = t["content"][:10]
+    if not published_date:
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                raw = script.string or ""
+                d   = json.loads(raw)
+                items = d if isinstance(d, list) else [d]
+                for item in items:
+                    if item.get("datePublished"):
+                        published_date = item["datePublished"][:10]
+                        if not author and item.get("author"):
+                            a = item["author"]
+                            author = a.get("name") if isinstance(a, dict) else str(a)
+                        break
+                if published_date:
+                    break
+            except Exception:
+                pass
+
+    language = ""
+    html_tag = soup.find("html")
+    if html_tag:
+        language = html_tag.get("lang", "")
+
+    if og_image:
+        og_image = abs_url(base_url, og_image) or og_image
+
+    return {
+        "title": title, "description": description, "og_image": og_image,
+        "og_type": og_type, "site_name": site_name, "author": author,
+        "published_date": published_date, "keywords": keywords,
+        "language": language,
+    }
+
+
+def extract_embeds(soup, base):
+    """Detecta iframes de plataformas conocidas: YouTube, Vimeo, Twitter, etc."""
+    embeds, seen = [], set()
+    for ifr in soup.find_all("iframe"):
+        src = (ifr.get("src") or ifr.get("data-src") or "").strip()
+        if not src: continue
+        full = abs_url(base, src) or src
+        if full in seen: continue
+        src_lower = full.lower()
+
+        etype = None
+        for name, patterns in EMBED_PLATFORMS:
+            if any(re.search(p, src_lower) for p in patterns):
+                etype = name
+                break
+        if not etype:
+            continue
+        seen.add(full)
+
+        thumbnail = None
+        if etype == "youtube":
+            vid = yt_id(full)
+            if vid:
+                thumbnail = f"https://img.youtube.com/vi/{vid}/hqdefault.jpg"
+                full = f"https://www.youtube.com/embed/{vid}"
+
+        embeds.append({
+            "type":      etype,
+            "title":     ifr.get("title") or etype.capitalize(),
+            "url":       full,
+            "thumbnail": thumbnail,
+        })
+    return embeds[:20]
+
+
+def extract_audio(soup, base):
+    """Detecta audio HTML5, mp3/wav directos, RSS podcast y SoundCloud."""
+    audio_list, seen = [], set()
+    AUDIO_EXT = [".mp3",".ogg",".wav",".m4a",".aac",".flac"]
+
+    for tag in soup.find_all("audio"):
+        src = tag.get("src","")
+        if not src:
+            s = tag.find("source")
+            src = s.get("src","") if s else ""
+        if src:
+            fu = abs_url(base, src)
+            if fu and fu not in seen:
+                seen.add(fu)
+                audio_list.append({
+                    "url": fu,
+                    "title": tag.get("title") or os.path.basename(urlparse(fu).path) or "Audio",
+                    "type": "html5",
+                })
+
+    for a in soup.find_all("a", href=True):
+        href_l = a["href"].lower()
+        if any(ext in href_l for ext in AUDIO_EXT):
+            fu = abs_url(base, a["href"])
+            if fu and fu not in seen:
+                seen.add(fu)
+                audio_list.append({
+                    "url": fu,
+                    "title": a.get_text(strip=True) or os.path.basename(urlparse(fu).path) or "Audio",
+                    "type": "direct",
+                })
+
+    for link in soup.find_all("link"):
+        ltype = link.get("type","")
+        if re.search(r"rss|atom|podcast", ltype, re.I):
+            href = link.get("href","")
+            if href:
+                fu = abs_url(base, href)
+                if fu and fu not in seen:
+                    seen.add(fu)
+                    audio_list.append({
+                        "url": fu,
+                        "title": link.get("title","Feed RSS/Podcast"),
+                        "type": "rss",
+                    })
+
+    return audio_list[:20]
+
+
+def detect_page_type(html_str, base_url):
+    """Clasifica el tipo de página usando señales del HTML y la URL."""
+    sample = (html_str[:30000] + " " + base_url).lower()
+    scores = {}
+    for ptype, keywords in PAGE_TYPE_SIGNALS.items():
+        scores[ptype] = sum(1 for kw in keywords if kw in sample)
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 0 else "Otro"
+
+
+def extract_all_links(soup, base_url):
+    """Inventario completo de enlaces: internos vs externos y top dominios."""
+    parsed_base = urlparse(base_url)
+    base_domain = parsed_base.netloc.lower().replace("www.","")
+    internal_count = 0
+    external_count = 0
+    domain_counts  = {}
+
+    for a in soup.find_all("a", href=True):
+        fu = abs_url(base_url, a["href"])
+        if not fu: continue
+        domain = urlparse(fu).netloc.lower().replace("www.","")
+        if domain == base_domain or not domain:
+            internal_count += 1
+        else:
+            external_count += 1
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+
+    top_domains = sorted(domain_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    return {
+        "internal":    internal_count,
+        "external":    external_count,
+        "total":       internal_count + external_count,
+        "top_domains": [{"domain": d, "count": c} for d, c in top_domains],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────
 #  FUNCIÓN PRINCIPAL — scrape_url
 # ─────────────────────────────────────────────────────────────────
 
@@ -473,32 +829,64 @@ def scrape_url(url, use_browser=False, headless=True):
     except Exception:
         soup = BeautifulSoup(html, "html.parser")
 
+    # ── Extraer metadata y tipo ANTES de limpiar scripts (necesitan JSON-LD)
+    metadata  = extract_metadata(soup, final_url)
+    page_type = detect_page_type(html, final_url)
+    embeds    = extract_embeds(soup, final_url)
+    audio     = extract_audio(soup, final_url)
+    all_links = extract_all_links(soup, final_url)
+
+    # Limpiar scripts/styles para el resto de extractores
     for tag in soup.find_all(["script","style"]):
         tag.decompose()
 
-    title_tag = soup.find("title")
-    page_title = title_tag.get_text(strip=True) if title_tag else "Sin título"
+    title_tag  = soup.find("title")
+    page_title = title_tag.get_text(strip=True) if title_tag else (metadata.get("title") or "Sin título")
 
-    meta = soup.find("meta", attrs={"name": "description"})
-    description = (meta["content"].strip() if meta and meta.get("content") else "")
+    meta_desc = soup.find("meta", attrs={"name": "description"})
+    description = (meta_desc["content"].strip()
+                   if meta_desc and meta_desc.get("content")
+                   else metadata.get("description") or "")
 
     news   = extract_news(soup, final_url)
     videos = extract_videos(soup, final_url)
     tables = extract_tables(soup)
     files  = extract_files(soup, final_url)
-    images = extract_images(soup, final_url)
+
+    # Imágenes: combinar extracción DOM + regex sobre HTML crudo
+    images_dom  = extract_images(soup, final_url)
+    images_raw, raw_seen = extract_images_from_raw(html, final_url)
+    # Fusionar: las del DOM van primero (tienen alt text), las del raw agregan las que faltan
+    dom_urls = {img["url"] for img in images_dom}
+    for img in images_raw:
+        if img["url"] not in dom_urls:
+            images_dom.append(img)
+    images = images_dom
 
     result = {
-        "title": page_title, "description": description, "url": final_url,
-        "news": news, "videos": videos, "tables": tables,
-        "files": files, "images": images,
-        "needed_js": needs_js,
+        "title":       page_title,
+        "description": description,
+        "url":         final_url,
+        "page_type":   page_type,
+        "metadata":    metadata,
+        "news":        news,
+        "videos":      videos,
+        "embeds":      embeds,
+        "tables":      tables,
+        "files":       files,
+        "images":      images,
+        "audio":       audio,
+        "all_links":   all_links,
+        "needed_js":   needs_js,
         "stats": {
-            "news_count":   len(news),
-            "videos_count": len(videos),
-            "tables_count": len(tables),
-            "files_count":  len(files),
-            "images_count": len(images),
+            "news_count":    len(news),
+            "videos_count":  len(videos),
+            "embeds_count":  len(embeds),
+            "tables_count":  len(tables),
+            "files_count":   len(files),
+            "images_count":  len(images),
+            "audio_count":   len(audio),
+            "links_total":   all_links["total"],
         }
     }
     if browser_err:
@@ -629,4 +1017,254 @@ def start_export(news, files, images, page_title):
     threading.Thread(target=run_export_task,
                      args=(tid, news, files, images, page_title),
                      daemon=True).start()
+    return tid
+
+
+# ─────────────────────────────────────────────────────────────────
+#  COMPILAR TODAS LAS NOTICIAS → UN SOLO PDF ORGANIZADO
+# ─────────────────────────────────────────────────────────────────
+
+def _enc(text):
+    """Codifica texto a Latin-1 sin errores (reemplaza caracteres no soportados)."""
+    return (text or "").encode("latin-1", "replace").decode("latin-1")
+
+
+def run_compile_pdf_task(task_id, news_list, page_title):
+    task = PDF_TASKS[task_id]
+    try:
+        from fpdf import FPDF
+
+        date_str  = datetime.now().strftime("%Y%m%d_%H%M")
+        pdf_name  = f"noticias_{_safe(page_title, 30)}_{date_str}.pdf"
+        pdf_path  = DOWNLOAD_DIR / pdf_name
+        total     = len(news_list) or 1
+
+        _title = page_title  # closure
+
+        class CompilePDF(FPDF):
+            def header(self):
+                if self.page_no() == 1:
+                    return
+                self.set_font("Helvetica", "I", 8)
+                self.set_text_color(150, 150, 150)
+                self.cell(0, 8, _enc(_title)[:70], align="L")
+                self.set_draw_color(220, 220, 220)
+                self.set_line_width(0.3)
+                self.line(15, self.get_y() + 2, 195, self.get_y() + 2)
+                self.ln(5)
+
+            def footer(self):
+                self.set_y(-13)
+                self.set_font("Helvetica", "I", 8)
+                self.set_text_color(150, 150, 150)
+                self.cell(0, 8, f"Pagina {self.page_no()} | WebScraper Pro", align="C")
+
+        pdf = CompilePDF()
+        pdf.set_margins(15, 20, 15)
+        pdf.set_auto_page_break(True, 18)
+
+        # ── PORTADA ──
+        pdf.add_page()
+        pdf.set_font("Helvetica", "B", 26)
+        pdf.set_text_color(30, 58, 138)
+        pdf.ln(18)
+        pdf.multi_cell(0, 13, _enc(page_title), align="C")
+        pdf.ln(4)
+        pdf.set_font("Helvetica", "", 12)
+        pdf.set_text_color(71, 85, 105)
+        pdf.cell(0, 8, f"Recopilacion de {len(news_list)} noticias", align="C", ln=True)
+        pdf.cell(0, 8, datetime.now().strftime("Generado el %d/%m/%Y a las %H:%M"),
+                 align="C", ln=True)
+        pdf.ln(8)
+        pdf.set_draw_color(30, 58, 138)
+        pdf.set_line_width(1.2)
+        pdf.line(25, pdf.get_y(), 185, pdf.get_y())
+        pdf.ln(10)
+
+        # Índice agrupado por categoría
+        CAT_ORDER = ["Regional", "Educacion", "Salud", "Deporte", "Otros"]
+        cat_map = {}
+        for item in news_list:
+            cat = item.get("category", "Otros")
+            cat_key = cat.replace("ó","o").replace("é","e").replace("á","a").replace("í","i").replace("ú","u")
+            cat_map.setdefault(cat_key, []).append(item)
+
+        pdf.set_font("Helvetica", "B", 11)
+        pdf.set_text_color(30, 41, 59)
+        pdf.cell(0, 7, "INDICE:", ln=True)
+        pdf.ln(1)
+        num = 1
+        for cat_key in CAT_ORDER + [k for k in cat_map if k not in CAT_ORDER]:
+            items = cat_map.get(cat_key, [])
+            if not items:
+                continue
+            pdf.set_font("Helvetica", "B", 9)
+            pdf.set_text_color(30, 58, 138)
+            pdf.cell(0, 6, f"  {cat_key.upper()} ({len(items)})", ln=True)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_text_color(71, 85, 105)
+            for item in items:
+                t = _enc(item["title"])[:100]
+                pdf.cell(0, 5, f"    {num:02d}. {t}", ln=True)
+                num += 1
+        pdf.ln(4)
+
+        # ── ARTÍCULOS ordenados por categoría ──
+        CAT_COLORS = {
+            "Regional":  (37,  99,  235),
+            "Educacion": (124, 58,  237),
+            "Salud":     (22,  163, 74),
+            "Deporte":   (234, 88,  12),
+            "Otros":     (100, 116, 139),
+        }
+
+        article_num = 1
+        for cat_key in CAT_ORDER + [k for k in cat_map if k not in CAT_ORDER]:
+            items = cat_map.get(cat_key, [])
+            if not items:
+                continue
+            for item in items:
+                pct = min(int(article_num / total * 92), 92)
+                task["progress"] = pct
+                task["msg"] = f"Artículo {article_num}/{len(news_list)}: {item['title'][:50]}..."
+
+                try:
+                    content = scrape_full_article(item.get("link",""))
+                except Exception:
+                    content = "No se pudo extraer el contenido."
+                if not content or len(content) < 20:
+                    content = "Contenido no disponible para este artículo."
+
+                pdf.add_page()
+                rgb = CAT_COLORS.get(cat_key, CAT_COLORS["Otros"])
+
+                # Badge categoría
+                pdf.set_fill_color(*rgb)
+                pdf.set_text_color(255, 255, 255)
+                pdf.set_font("Helvetica", "B", 8)
+                badge_txt = f"  {cat_key.upper()}  — N° {article_num:02d}  "
+                pdf.cell(0, 7, _enc(badge_txt), fill=True, ln=True)
+                pdf.ln(2)
+
+                # Título
+                pdf.set_font("Helvetica", "B", 15)
+                pdf.set_text_color(30, 58, 138)
+                pdf.multi_cell(0, 8, _enc(item["title"]))
+                pdf.ln(2)
+
+                # URL fuente
+                pdf.set_font("Helvetica", "I", 8)
+                pdf.set_text_color(100, 116, 139)
+                pdf.multi_cell(0, 5, f"Fuente: {_enc(item.get('link',''))}")
+                pdf.ln(3)
+
+                # Línea separadora
+                pdf.set_draw_color(200, 210, 230)
+                pdf.set_line_width(0.4)
+                pdf.line(15, pdf.get_y(), 195, pdf.get_y())
+                pdf.ln(4)
+
+                # Contenido
+                pdf.set_font("Helvetica", "", 10)
+                pdf.set_text_color(30, 41, 59)
+                for para in content.split("\n"):
+                    para = para.strip()
+                    if not para:
+                        pdf.ln(2)
+                        continue
+                    p = _enc(para)
+                    if len(para) < 80 and para.isupper():
+                        pdf.set_font("Helvetica", "B", 10)
+                        pdf.set_text_color(*rgb)
+                        pdf.multi_cell(0, 6, p)
+                        pdf.set_font("Helvetica", "", 10)
+                        pdf.set_text_color(30, 41, 59)
+                    else:
+                        pdf.multi_cell(0, 6, p)
+                    pdf.ln(1)
+
+                article_num += 1
+
+        pdf.output(str(pdf_path))
+        task["status"]   = "done"
+        task["progress"] = 100
+        task["filename"] = pdf_name
+        task["msg"]      = f"PDF listo — {len(news_list)} noticias compiladas"
+
+    except Exception as e:
+        task["status"] = "error"
+        task["msg"]    = str(e)
+
+
+def start_compile_news(news_list, page_title):
+    tid = uuid.uuid4().hex[:12]
+    PDF_TASKS[tid] = {
+        "progress": 0, "status": "working",
+        "msg": "Iniciando compilación...", "filename": None,
+    }
+    threading.Thread(
+        target=run_compile_pdf_task,
+        args=(tid, news_list, page_title),
+        daemon=True,
+    ).start()
+    return tid
+
+
+# ─────────────────────────────────────────────────────────────────
+#  DESCARGAR TODOS LOS DOCUMENTOS → ZIP
+# ─────────────────────────────────────────────────────────────────
+
+def run_docs_zip_task(task_id, files_list, page_title):
+    task = DOC_ZIP_TASKS[task_id]
+    try:
+        date_str = datetime.now().strftime("%Y%m%d_%H%M")
+        zip_name = f"documentos_{_safe(page_title, 30)}_{date_str}.zip"
+        zip_path = DOWNLOAD_DIR / zip_name
+        total    = len(files_list) or 1
+        ok       = 0
+
+        with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
+            for i, f in enumerate(files_list):
+                task["msg"]      = f"Descargando {i+1}/{len(files_list)}: {f['filename']}"
+                task["progress"] = min(int(i / total * 94), 94)
+                try:
+                    fp, fn = download_file(f["url"], f["filename"])
+                    if fp:
+                        zf.write(fp, fn)
+                        ok += 1
+                except Exception:
+                    pass
+
+            # Índice
+            idx = [
+                f"DOCUMENTOS — {page_title}",
+                f"Fecha: {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+                "=" * 60,
+            ]
+            for j, ff in enumerate(files_list, 1):
+                idx.append(f"  {j:02d}. [{ff['type']}] {ff['name']}")
+                idx.append(f"       {ff['url']}")
+            zf.writestr("LISTA_DOCUMENTOS.txt", "\n".join(idx))
+
+        task["status"]   = "done"
+        task["progress"] = 100
+        task["filename"] = zip_name
+        task["msg"]      = f"ZIP listo — {ok}/{len(files_list)} documentos descargados"
+
+    except Exception as e:
+        task["status"] = "error"
+        task["msg"]    = str(e)
+
+
+def start_docs_zip(files_list, page_title):
+    tid = uuid.uuid4().hex[:12]
+    DOC_ZIP_TASKS[tid] = {
+        "progress": 0, "status": "working",
+        "msg": "Iniciando descarga de documentos...", "filename": None,
+    }
+    threading.Thread(
+        target=run_docs_zip_task,
+        args=(tid, files_list, page_title),
+        daemon=True,
+    ).start()
     return tid

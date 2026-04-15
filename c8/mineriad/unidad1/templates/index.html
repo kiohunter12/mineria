@@ -106,8 +106,28 @@
       </button>
     </div>
 
+    <!-- Page summary row (tipo, autor, fecha, og:image) -->
+    <div id="pageSummaryRow" class="page-summary-row d-none">
+      <div class="d-flex flex-wrap align-items-center gap-3">
+        <img id="ogImage" src="" alt="" class="page-og-img d-none" />
+        <div class="d-flex flex-wrap gap-2 align-items-center flex-grow-1">
+          <span id="pageTypeBadge" class="page-type-badge"></span>
+          <span id="pageSiteName" class="text-muted small fw-semibold"></span>
+          <span id="pageAuthor" class="page-meta-item d-none small">
+            <i class="fas fa-user-pen text-muted"></i><span id="pageAuthorText"></span>
+          </span>
+          <span id="pagePublishedDate" class="page-meta-item d-none small">
+            <i class="fas fa-calendar-days text-muted"></i><span id="pagePublishedDateText"></span>
+          </span>
+          <span id="pageLanguage" class="page-meta-item d-none small">
+            <i class="fas fa-language text-muted"></i><span id="pageLanguageText"></span>
+          </span>
+        </div>
+      </div>
+    </div>
+
     <!-- Stats -->
-    <div class="row g-2 mt-2">
+    <div class="row g-2 mt-2" id="statsRow">
       <div class="col"><div class="stat-box stat-news">
         <div class="stat-number" id="statNews">0</div>
         <div class="stat-label"><i class="fas fa-newspaper me-1"></i>Noticias</div>
@@ -115,6 +135,10 @@
       <div class="col"><div class="stat-box stat-videos">
         <div class="stat-number" id="statVideos">0</div>
         <div class="stat-label"><i class="fas fa-play me-1"></i>Videos</div>
+      </div></div>
+      <div class="col"><div class="stat-box stat-embeds">
+        <div class="stat-number" id="statEmbeds">0</div>
+        <div class="stat-label"><i class="fas fa-code me-1"></i>Embeds</div>
       </div></div>
       <div class="col"><div class="stat-box stat-tables">
         <div class="stat-number" id="statTables">0</div>
@@ -127,6 +151,14 @@
       <div class="col"><div class="stat-box stat-images">
         <div class="stat-number" id="statImages">0</div>
         <div class="stat-label"><i class="fas fa-image me-1"></i>Imágenes</div>
+      </div></div>
+      <div class="col"><div class="stat-box stat-audio">
+        <div class="stat-number" id="statAudio">0</div>
+        <div class="stat-label"><i class="fas fa-headphones me-1"></i>Audio</div>
+      </div></div>
+      <div class="col"><div class="stat-box stat-links">
+        <div class="stat-number" id="statLinks">0</div>
+        <div class="stat-label"><i class="fas fa-link me-1"></i>Enlaces</div>
       </div></div>
     </div>
   </div>
@@ -148,19 +180,31 @@
     <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabImagenes">
       <i class="fas fa-images me-1"></i>Imágenes <span class="badge bg-secondary ms-1" id="badgeImagenes">0</span>
     </button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabAudio">
+      <i class="fas fa-headphones me-1"></i>Audio <span class="badge bg-info text-dark ms-1" id="badgeAudio">0</span>
+    </button></li>
   </ul>
 
   <div class="tab-content result-tab-content">
 
     <!-- ── TAB NOTICIAS ── -->
     <div class="tab-pane fade show active" id="tabNoticias">
-      <div class="category-filter mb-4">
-        <button class="btn btn-filter active" onclick="filterCategory('Todas',this)">Todas</button>
-        <button class="btn btn-filter cat-regional"  onclick="filterCategory('Regional',this)"><i class="fas fa-map-marker-alt me-1"></i>Regional</button>
-        <button class="btn btn-filter cat-educacion" onclick="filterCategory('Educación',this)"><i class="fas fa-graduation-cap me-1"></i>Educación</button>
-        <button class="btn btn-filter cat-salud"     onclick="filterCategory('Salud',this)"><i class="fas fa-heart-pulse me-1"></i>Salud</button>
-        <button class="btn btn-filter cat-deporte"   onclick="filterCategory('Deporte',this)"><i class="fas fa-futbol me-1"></i>Deporte</button>
-        <button class="btn btn-filter cat-otros"     onclick="filterCategory('Otros',this)"><i class="fas fa-ellipsis me-1"></i>Otros</button>
+      <div class="news-toolbar">
+        <!-- filtros por categoría -->
+        <div class="d-flex flex-wrap gap-1 flex-grow-1">
+          <button class="btn btn-filter active" data-cat="Todas"     onclick="filterCategory('Todas',this)">Todas<span class="filter-count" id="cnt-Todas"></span></button>
+          <button class="btn btn-filter cat-regional"  data-cat="Regional"  onclick="filterCategory('Regional',this)"><i class="fas fa-map-marker-alt me-1"></i>Regional<span class="filter-count" id="cnt-Regional"></span></button>
+          <button class="btn btn-filter cat-educacion" data-cat="Educación" onclick="filterCategory('Educación',this)"><i class="fas fa-graduation-cap me-1"></i>Educación<span class="filter-count" id="cnt-Educación"></span></button>
+          <button class="btn btn-filter cat-salud"     data-cat="Salud"     onclick="filterCategory('Salud',this)"><i class="fas fa-heart-pulse me-1"></i>Salud<span class="filter-count" id="cnt-Salud"></span></button>
+          <button class="btn btn-filter cat-deporte"   data-cat="Deporte"   onclick="filterCategory('Deporte',this)"><i class="fas fa-futbol me-1"></i>Deporte<span class="filter-count" id="cnt-Deporte"></span></button>
+          <button class="btn btn-filter cat-otros"     data-cat="Otros"     onclick="filterCategory('Otros',this)"><i class="fas fa-ellipsis me-1"></i>Otros<span class="filter-count" id="cnt-Otros"></span></button>
+        </div>
+        <!-- ordenar + compilar -->
+        <div class="d-flex gap-2 align-items-center flex-shrink-0">
+          <button class="btn-sort-news active" id="sortBtnCat" onclick="toggleNewsSort('cat',this)"><i class="fas fa-tags me-1"></i>Categoría</button>
+          <button class="btn-sort-news" id="sortBtnRel" onclick="toggleNewsSort('rel',this)"><i class="fas fa-fire me-1"></i>Relevancia</button>
+          <button class="btn-compile-pdf" id="btnCompilePDF" onclick="compileNewsPDF()"><i class="fas fa-file-pdf me-1"></i>Compilar PDF</button>
+        </div>
       </div>
       <div class="row g-3" id="newsGrid"></div>
       <div id="noNewsMsg" class="empty-state d-none"><i class="fas fa-newspaper"></i><p>No se encontraron noticias</p></div>
@@ -168,8 +212,17 @@
 
     <!-- ── TAB VIDEOS ── -->
     <div class="tab-pane fade" id="tabVideos">
+      <!-- Embeds subsección -->
+      <div id="embedsSection" class="d-none mb-4">
+        <h6 class="fw-bold text-muted mb-3">
+          <i class="fas fa-code me-1"></i>Embeds detectados
+          <span class="badge bg-secondary ms-1" id="badgeEmbeds">0</span>
+        </h6>
+        <div class="row g-3" id="embedsGrid"></div>
+        <hr class="my-4" />
+      </div>
       <div class="row g-4" id="videosGrid"></div>
-      <div id="noVideosMsg" class="empty-state d-none"><i class="fas fa-film"></i><p>No se encontraron videos en esta página</p></div>
+      <div id="noVideosMsg" class="empty-state d-none"><i class="fas fa-film"></i><p>No se encontraron videos ni embeds en esta página</p></div>
     </div>
 
     <!-- ── TAB TABLAS ── -->
@@ -180,6 +233,11 @@
 
     <!-- ── TAB ARCHIVOS ── -->
     <div class="tab-pane fade" id="tabArchivos">
+      <div class="files-toolbar">
+        <button class="btn-docs-zip" id="btnDocsZip" onclick="startDocsZip()">
+          <i class="fas fa-file-zipper me-1"></i>Descargar todos como ZIP
+        </button>
+      </div>
       <div id="filesList"></div>
       <div id="noFilesMsg" class="empty-state d-none"><i class="fas fa-folder-open"></i><p>No se encontraron archivos descargables</p></div>
     </div>
@@ -190,7 +248,29 @@
       <div id="noImagesMsg" class="empty-state d-none"><i class="fas fa-image"></i><p>No se encontraron imágenes</p></div>
     </div>
 
+    <!-- ── TAB AUDIO ── -->
+    <div class="tab-pane fade" id="tabAudio">
+      <div id="audioList"></div>
+      <div id="noAudioMsg" class="empty-state d-none"><i class="fas fa-headphones"></i><p>No se encontraron archivos de audio o podcasts</p></div>
+    </div>
+
   </div>
+
+  <!-- ── ANÁLISIS DE ENLACES ── -->
+  <div id="allLinksSection" class="d-none mt-4">
+    <button class="btn btn-outline-secondary btn-sm w-100 text-start d-flex justify-content-between align-items-center"
+            type="button" data-bs-toggle="collapse" data-bs-target="#allLinksCollapse">
+      <span><i class="fas fa-link me-2"></i><span id="allLinksLabel">Análisis de enlaces (0)</span></span>
+      <i class="fas fa-chevron-down"></i>
+    </button>
+    <div class="collapse" id="allLinksCollapse">
+      <div class="links-summary-box">
+        <div class="d-flex flex-wrap gap-2 mb-3" id="linksSummaryStats"></div>
+        <div id="topDomainsWrap"></div>
+      </div>
+    </div>
+  </div>
+
 </section>
 
 <!-- ===== MODAL: PROGRESO ZIP ===== -->
@@ -325,6 +405,78 @@
           <iframe id="videoModalFrame" src="" frameborder="0" allowfullscreen
                   style="position:absolute;top:0;left:0;width:100%;height:100%;"></iframe>
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: COMPILAR PDF ===== -->
+<div class="modal fade" id="compilePdfModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title fw-bold">
+          <i class="fas fa-file-pdf me-2 text-danger"></i>Compilando PDF de noticias
+        </h5>
+      </div>
+      <div class="modal-body pt-2 pb-3">
+        <div class="progress compile-progress mb-2">
+          <div id="compilePdfBar" class="progress-bar progress-bar-striped progress-bar-animated bg-danger"
+               role="progressbar" style="width:0%"></div>
+        </div>
+        <div class="d-flex justify-content-between mb-3">
+          <span id="compilePdfMsg" class="text-muted small">Iniciando...</span>
+          <span id="compilePdfPct" class="fw-bold text-danger">0%</span>
+        </div>
+        <div id="compilePdfDone" class="alert alert-success d-none py-2">
+          <i class="fas fa-circle-check me-1"></i><span id="compilePdfDoneMsg"></span>
+          <br/>
+          <button class="btn btn-success btn-sm mt-2" onclick="downloadCompilePdf()">
+            <i class="fas fa-download me-1"></i>Descargar PDF compilado
+          </button>
+        </div>
+        <div id="compilePdfError" class="alert alert-danger d-none py-2">
+          <i class="fas fa-circle-xmark me-1"></i><span id="compilePdfErrorMsg"></span>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MODAL: DOCS ZIP ===== -->
+<div class="modal fade" id="docsZipModal" tabindex="-1" data-bs-backdrop="static">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h5 class="modal-title fw-bold">
+          <i class="fas fa-file-zipper me-2 text-info"></i>Descargando documentos como ZIP
+        </h5>
+      </div>
+      <div class="modal-body pt-2 pb-3">
+        <div class="progress compile-progress mb-2">
+          <div id="docsZipBar" class="progress-bar progress-bar-striped progress-bar-animated bg-info"
+               role="progressbar" style="width:0%"></div>
+        </div>
+        <div class="d-flex justify-content-between mb-3">
+          <span id="docsZipMsg" class="text-muted small">Iniciando...</span>
+          <span id="docsZipPct" class="fw-bold text-info">0%</span>
+        </div>
+        <div id="docsZipDone" class="alert alert-success d-none py-2">
+          <i class="fas fa-circle-check me-1"></i><span id="docsZipDoneMsg"></span>
+          <br/>
+          <button class="btn btn-success btn-sm mt-2" onclick="downloadDocsZip()">
+            <i class="fas fa-download me-1"></i>Descargar ZIP de documentos
+          </button>
+        </div>
+        <div id="docsZipError" class="alert alert-danger d-none py-2">
+          <i class="fas fa-circle-xmark me-1"></i><span id="docsZipErrorMsg"></span>
+        </div>
+      </div>
+      <div class="modal-footer border-0 pt-0">
+        <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
       </div>
     </div>
   </div>
