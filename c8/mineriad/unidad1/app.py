@@ -177,9 +177,20 @@ def serve_file(filename):
 
 
 if __name__ == '__main__':
+    import socket
+    # Seleccionar puerto libre automáticamente si 5000 está ocupado
+    PORT = 5000
+    for candidate in [5000, 5001, 5002, 5003]:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("127.0.0.1", candidate))
+            PORT = candidate
+            break
+        except OSError:
+            continue
     print("=" * 55)
     print("  WebScraper Pro v2 — Servidor iniciado")
-    print("  Principal : http://127.0.0.1:5000")
-    print("  SENAMHI   : http://127.0.0.1:5000/senamhi")
+    print(f"  Principal : http://127.0.0.1:{PORT}")
+    print(f"  SENAMHI   : http://127.0.0.1:{PORT}/senamhi")
     print("=" * 55)
-    app.run(debug=True, port=5000, threaded=True)
+    app.run(debug=True, port=PORT, threaded=True)
