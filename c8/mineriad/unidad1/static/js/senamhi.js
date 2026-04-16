@@ -6,6 +6,12 @@ let pollInterval  = null;
 let currentZip    = null;
 let singleCsvData = null;   // { headers, rows, name }
 
+// Histórico
+let histStationIdx   = null;
+let histTaskId       = null;
+let histPollInterval = null;
+let histZipFile      = null;
+
 // ── Utilidades ──────────────────────────────────────────────────
 function show(id) { document.getElementById(id).classList.remove('d-none'); }
 function hide(id) { document.getElementById(id).classList.add('d-none'); }
@@ -116,9 +122,12 @@ function renderStations(list) {
       <td>${typeBadge(st.type)}</td>
       <td>${escHtml(st.dept) || '—'}</td>
       <td>${escHtml(st.alt)  || '—'}</td>
-      <td>
+      <td class="d-flex flex-wrap gap-1">
         <button class="btn-view-data" onclick="verDatos(${i})">
           <i class="fas fa-table me-1"></i>Ver datos
+        </button>
+        <button class="btn-hist-data" onclick="verHistorial(${i})">
+          <i class="fas fa-calendar-days me-1"></i>Historial
         </button>
       </td>`;
     tbody.appendChild(tr);
@@ -357,6 +366,135 @@ function downloadZipFile() {
   a.download = currentZip;
   document.body.appendChild(a); a.click(); a.remove();
   showToast('¡ZIP descargado!', 'success');
+}
+
+// ── Abrir modal de descarga histórica ──────────────────────────
+function verHistorial(idx) {
+  const st = allStations[idx];
+  if (!st) return;
+  histStationIdx = idx;
+  histZipFile    = null;
+
+  document.getElementById('histStationName').textContent = st.name;
+
+  // Poblar selectores de año (2000 → año actual)
+  const curYear = new Date().getFullYear();
+  const fromSel = document.getElementById('histYearFrom');
+  const toSel   = document.getElementById('histYearTo');
+  fromSel.innerHTML = '';
+  toSel.innerHTML   = '';
+  for (let y = curYear; y >= 2000; y--) {
+    fromSel.innerHTML += `<option value="${y}">${y}</option>`;
+    toSel.innerHTML   += `<option value="${y}">${y}</option>`;
+  }
+  // Defaults: últimos 2 años completos
+  fromSel.value = String(curYear - 2);
+  toSel.value   = String(curYear);
+
+  // Resetear secciones
+  document.getElementById('histDoneSection').classList.add('d-none');
+  document.getElementById('histErrorSection').classList.add('d-none');
+
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('histModal')).show();
+}
+
+// ── Iniciar descarga histórica ──────────────────────────────────
+async function iniciarDescargaHistorica() {
+  const st = allStations[histStationIdx];
+  if (!st) return;
+
+  const yearFrom = parseInt(document.getElementById('histYearFrom').value);
+  const yearTo   = parseInt(document.getElementById('histYearTo').value);
+  const headless = document.getElementById('histHeadless').checked;
+
+  if (yearFrom > yearTo) {
+    showToast('El año inicial no puede ser mayor al año final.', 'warning');
+    return;
+  }
+
+  // Cerrar histModal y abrir progress
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('histModal')).hide();
+
+  document.getElementById('histProgressBar').style.width = '0%';
+  document.getElementById('histProgressBar').className =
+    'progress-bar progress-bar-striped progress-bar-animated bg-primary';
+  document.getElementById('histPercent').textContent    = '0%';
+  document.getElementById('histStatusMsg').textContent  = 'Iniciando…';
+  document.getElementById('histCurrentMsg').textContent = '—';
+  document.getElementById('histCurrentBox').classList.remove('d-none');
+  document.getElementById('histDoneSection').classList.add('d-none');
+  document.getElementById('histErrorSection').classList.add('d-none');
+
+  bootstrap.Modal.getOrCreateInstance(document.getElementById('histProgressModal')).show();
+
+  try {
+    const res  = await fetch('/senamhi/historical-download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        station:   st,
+        year_from: yearFrom,
+        year_to:   yearTo,
+        headless:  headless,
+      }),
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    histTaskId = data.task_id;
+    histPollInterval = setInterval(pollHistStatus, 2000);
+  } catch (err) {
+    document.getElementById('histErrorMsg').textContent = err.message;
+    document.getElementById('histErrorSection').classList.remove('d-none');
+    document.getElementById('histCurrentBox').classList.add('d-none');
+  }
+}
+
+// ── Polling estado histórico ────────────────────────────────────
+async function pollHistStatus() {
+  if (!histTaskId) return;
+  try {
+    const res  = await fetch(`/senamhi/historical-status/${histTaskId}`);
+    const task = await res.json();
+
+    const pct = task.progress || 0;
+    document.getElementById('histProgressBar').style.width = pct + '%';
+    document.getElementById('histPercent').textContent     = pct + '%';
+    document.getElementById('histStatusMsg').textContent   = task.msg || '';
+    document.getElementById('histCurrentMsg').textContent  = task.msg || '—';
+
+    if (task.status === 'done') {
+      clearInterval(histPollInterval);
+      histZipFile = task.filename;
+      document.getElementById('histProgressBar').style.width = '100%';
+      document.getElementById('histProgressBar').className   = 'progress-bar bg-success';
+      document.getElementById('histPercent').textContent     = '100%';
+      document.getElementById('histCurrentBox').classList.add('d-none');
+      document.getElementById('histDoneMsg').textContent = task.msg;
+      document.getElementById('histDoneSection').classList.remove('d-none');
+    }
+
+    if (task.status === 'error') {
+      clearInterval(histPollInterval);
+      document.getElementById('histCurrentBox').classList.add('d-none');
+      document.getElementById('histErrorMsg').textContent = task.msg;
+      document.getElementById('histErrorSection').classList.remove('d-none');
+    }
+  } catch (err) {
+    clearInterval(histPollInterval);
+    document.getElementById('histCurrentBox').classList.add('d-none');
+    document.getElementById('histErrorMsg').textContent = 'Error de conexión: ' + err.message;
+    document.getElementById('histErrorSection').classList.remove('d-none');
+  }
+}
+
+// ── Descargar ZIP histórico ─────────────────────────────────────
+function downloadHistZip() {
+  if (!histZipFile) return;
+  const a = document.createElement('a');
+  a.href     = `/download-file/${encodeURIComponent(histZipFile)}`;
+  a.download = histZipFile;
+  document.body.appendChild(a); a.click(); a.remove();
+  showToast('¡ZIP histórico descargado!', 'success');
 }
 
 // ── Enter en selector de región ─────────────────────────────────

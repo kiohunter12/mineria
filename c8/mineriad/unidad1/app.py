@@ -4,7 +4,8 @@ from scraper import (scrape_url, download_file, scrape_full_article,
                      PDF_TASKS, start_compile_news,
                      DOC_ZIP_TASKS, start_docs_zip)
 from senamhi import (get_stations, start_senamhi_task,
-                     SENAMHI_TASKS, REGIONS, get_station_data)
+                     SENAMHI_TASKS, REGIONS, get_station_data,
+                     start_historical_task, HIST_TASKS)
 from pathlib import Path
 import re
 
@@ -71,6 +72,29 @@ def senamhi_download_all():
 @app.route('/senamhi/status/<task_id>')
 def senamhi_status(task_id):
     task = SENAMHI_TASKS.get(task_id)
+    if not task:
+        return jsonify({'error': 'Tarea no encontrada'}), 404
+    return jsonify(task)
+
+
+@app.route('/senamhi/historical-download', methods=['POST'])
+def senamhi_historical_download():
+    data = request.get_json()
+    if not data or 'station' not in data:
+        return jsonify({'error': 'Datos de estación requeridos'}), 400
+    station    = data['station']
+    year_from  = int(data.get('year_from', 2020))
+    year_to    = int(data.get('year_to',   2024))
+    headless   = bool(data.get('headless', True))
+    if year_from > year_to:
+        return jsonify({'error': 'year_from debe ser ≤ year_to'}), 400
+    task_id = start_historical_task(station, year_from, year_to, headless)
+    return jsonify({'task_id': task_id})
+
+
+@app.route('/senamhi/historical-status/<task_id>')
+def senamhi_historical_status(task_id):
+    task = HIST_TASKS.get(task_id)
     if not task:
         return jsonify({'error': 'Tarea no encontrada'}), 404
     return jsonify(task)

@@ -12,9 +12,10 @@ from datetime import datetime
 DOWNLOAD_DIR = Path("downloads")
 DOWNLOAD_DIR.mkdir(exist_ok=True)
 
-SENAMHI_BASE    = "https://www.senamhi.gob.pe"
-SENAMHI_MAP_URL = "https://www.senamhi.gob.pe/mapas/mapa-estaciones-2/"
-SENAMHI_DATA_URL = "https://www.senamhi.gob.pe/?p=data-historica"
+SENAMHI_BASE      = "https://www.senamhi.gob.pe"
+SENAMHI_MAP_URL   = "https://www.senamhi.gob.pe/mapas/mapa-estaciones-2/"
+SENAMHI_DATA_URL  = "https://www.senamhi.gob.pe/?p=data-historica"
+SENAMHI_HIST_URL  = "https://www.senamhi.gob.pe/mapas/mapa-estaciones-2/__dt_est_tp_0s3n@mH1.php"
 
 HEADERS = {
     "User-Agent": (
@@ -97,6 +98,7 @@ REGIONS = {
 
 # Almacén de tareas SENAMHI
 SENAMHI_TASKS = {}
+HIST_TASKS    = {}   # tareas de descarga histórica por estación
 
 
 # ── Helpers ─────────────────────────────────────────────────────
@@ -318,6 +320,7 @@ def get_stations(region_code, use_selenium=False):
                 "ico":       st.get("ico", "M"),
                 "lat":       str(lat),
                 "lon":       str(lon),
+                "alt":       str(st.get("alt", "")),
                 "estado":    st.get("estado", "DIFERIDO"),
                 "dept":      REGIONS.get(region_code, region_code),
                 "link":      (
@@ -558,6 +561,243 @@ def start_senamhi_task(stations, region_name):
     t = threading.Thread(
         target=run_senamhi_task,
         args=(task_id, stations, region_name),
+        daemon=True,
+    )
+    t.start()
+    return task_id
+
+
+# ── Descarga HISTÓRICA por estación (mes a mes) ─────────────────
+
+def _open_station_browser(url, headless=True, wait=12):
+    """Abre la página de la estación con undetected-chromedriver."""
+    try:
+        import undetected_chromedriver as uc
+        opts = uc.ChromeOptions()
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--window-size=1280,900")
+        opts.add_argument(f"--user-agent={HEADERS['User-Agent']}")
+        if headless:
+            opts.add_argument("--headless=new")
+        drv = uc.Chrome(options=opts, use_subprocess=True)
+        drv.set_page_load_timeout(60)
+        drv.get(url)
+        time.sleep(wait)
+        return drv, None
+    except Exception as e:
+        return None, str(e)
+
+
+def get_available_months(station):
+    """
+    Carga la página de la estación con browser y devuelve
+    la lista de meses disponibles en el selector CBOFiltro.
+    Retorna (lista_de_yyyymm, error)
+    """
+    url = _build_station_url(station)
+    if not url:
+        return [], "Sin URL para la estación"
+
+    drv, err = _open_station_browser(url, headless=True, wait=12)
+    if not drv:
+        return [], f"No se pudo abrir el browser: {err}"
+
+    try:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import Select
+        try:
+            sel_el = drv.find_element(By.ID, "CBOFiltro")
+            sel    = Select(sel_el)
+            months = [
+                o.get_attribute("value")
+                for o in sel.options
+                if o.get_attribute("value") and len(o.get_attribute("value")) == 6
+            ]
+            return sorted(set(months)), None
+        except Exception as ex:
+            return [], f"No se encontró el selector CBOFiltro: {ex}"
+    finally:
+        try: drv.quit()
+        except Exception: pass
+
+
+def run_historical_download_task(task_id, station, year_from, year_to, headless=True):
+    """
+    Descarga datos históricos mes a mes para una estación.
+    Usa un solo browser session para eficiencia.
+    """
+    task = HIST_TASKS[task_id]
+    try:
+        url = _build_station_url(station)
+        if not url:
+            task["status"] = "error"
+            task["msg"]    = "Sin URL para la estación"
+            return
+
+        # Generar meses objetivo
+        now = datetime.now()
+        target_months = []
+        for yr in range(year_from, year_to + 1):
+            for mo in range(1, 13):
+                if datetime(yr, mo, 1) <= now:
+                    target_months.append(f"{yr}{mo:02d}")
+
+        if not target_months:
+            task["status"] = "error"
+            task["msg"]    = "No hay meses en el rango indicado"
+            return
+
+        task["msg"] = "Abriendo navegador y cargando estación..."
+
+        drv, err = _open_station_browser(url, headless=headless, wait=14)
+        if not drv:
+            task["status"] = "error"
+            task["msg"]    = f"No se pudo abrir el browser: {err}"
+            return
+
+        try:
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import Select, WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
+            # Verificar que el form existe
+            try:
+                WebDriverWait(drv, 15).until(
+                    EC.presence_of_element_located((By.ID, "CBOFiltro"))
+                )
+            except Exception:
+                # Página puede estar bloqueada por Turnstile
+                task["status"] = "error"
+                task["msg"]    = "La página no cargó el formulario (posible bloqueo Turnstile). Prueba con headless=False."
+                return
+
+            # Filtrar solo los meses disponibles en el selector
+            sel_el = drv.find_element(By.ID, "CBOFiltro")
+            sel_obj = Select(sel_el)
+            available = {
+                o.get_attribute("value")
+                for o in sel_obj.options
+                if o.get_attribute("value") and len(o.get_attribute("value")) == 6
+            }
+            target_months = [m for m in target_months if m in available]
+            total = len(target_months)
+
+            if total == 0:
+                task["status"] = "error"
+                task["msg"]    = "No hay meses disponibles en el selector para el rango indicado"
+                return
+
+            # Preparar ZIP
+            date_str = datetime.now().strftime("%Y%m%d_%H%M")
+            zip_name = f"senamhi_hist_{_safe(station['name'])}_{year_from}_{year_to}_{date_str}.zip"
+            zip_path = DOWNLOAD_DIR / zip_name
+
+            all_rows    = []
+            all_headers = []
+            successful  = 0
+            index_lines = [
+                f"SENAMHI — Histórico: {station['name']} ({station.get('code','')})",
+                f"Período: {year_from}–{year_to}",
+                f"Descarga: {datetime.now().strftime('%d/%m/%Y %H:%M')}",
+                "=" * 55,
+            ]
+
+            with zipfile.ZipFile(str(zip_path), "w", zipfile.ZIP_DEFLATED) as zf:
+                for i, yyyymm in enumerate(target_months):
+                    yr_s = yyyymm[:4]
+                    mo_s = yyyymm[4:]
+                    task["msg"]      = f"Descargando {yr_s}/{mo_s}  ({i+1}/{total})"
+                    task["progress"] = int(i / total * 88)
+
+                    try:
+                        # Seleccionar mes
+                        sel_el  = drv.find_element(By.ID, "CBOFiltro")
+                        Select(sel_el).select_by_value(yyyymm)
+                        time.sleep(0.5)
+
+                        # Enviar form (carga en iframe "contenedor")
+                        drv.execute_script("document.getElementById('frmData').submit();")
+                        time.sleep(5)
+
+                        # Leer iframe
+                        html_iframe = ""
+                        try:
+                            iframe = drv.find_element(By.NAME, "contenedor")
+                            drv.switch_to.frame(iframe)
+                            time.sleep(2)
+                            html_iframe = drv.page_source
+                            drv.switch_to.default_content()
+                        except Exception:
+                            drv.switch_to.default_content()
+                            html_iframe = drv.page_source
+
+                        tables = _extract_tables_from_html(html_iframe)
+                        if tables:
+                            hdrs, rows = max(tables, key=lambda t: len(t[1]))
+                            if not all_headers:
+                                all_headers = ["Año", "Mes"] + hdrs
+                            for row in rows:
+                                all_rows.append([yr_s, mo_s] + row)
+
+                            # CSV individual por mes
+                            csv_buf = io.StringIO()
+                            cw = csv.writer(csv_buf)
+                            cw.writerow(hdrs)
+                            cw.writerows(rows)
+                            fname = f"{station.get('code','est')}_{yyyymm}.csv"
+                            zf.writestr(
+                                f"meses/{fname}",
+                                "\ufeff" + csv_buf.getvalue()
+                            )
+                            index_lines.append(f"✓ {yr_s}/{mo_s} — {len(rows)} registros")
+                            successful += 1
+                        else:
+                            index_lines.append(f"✗ {yr_s}/{mo_s} — sin datos")
+
+                    except Exception as ex:
+                        index_lines.append(f"✗ {yr_s}/{mo_s} — error: {ex}")
+                        # Intentar recuperar la sesión
+                        try:
+                            drv.switch_to.default_content()
+                        except Exception:
+                            pass
+
+                # CSV combinado con todos los meses
+                if all_rows:
+                    csv_buf = io.StringIO()
+                    cw = csv.writer(csv_buf)
+                    if all_headers:
+                        cw.writerow(all_headers)
+                    cw.writerows(all_rows)
+                    combined_name = f"{station.get('code','est')}_historico_{year_from}_{year_to}.csv"
+                    zf.writestr(combined_name, "\ufeff" + csv_buf.getvalue())
+
+                zf.writestr("INDICE.txt", "\n".join(index_lines))
+
+        finally:
+            try: drv.quit()
+            except Exception: pass
+
+        task["status"]   = "done"
+        task["progress"] = 100
+        task["filename"] = zip_name
+        task["msg"]      = f"¡Listo! {successful}/{total} meses descargados."
+
+    except Exception as e:
+        task["status"] = "error"
+        task["msg"]    = str(e)
+
+
+def start_historical_task(station, year_from, year_to, headless=True):
+    task_id = uuid.uuid4().hex[:12]
+    HIST_TASKS[task_id] = {
+        "progress": 0, "status": "working",
+        "msg": "Iniciando...", "filename": None,
+    }
+    t = threading.Thread(
+        target=run_historical_download_task,
+        args=(task_id, station, year_from, year_to, headless),
         daemon=True,
     )
     t.start()

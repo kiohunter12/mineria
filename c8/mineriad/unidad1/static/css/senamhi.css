@@ -106,12 +106,19 @@ body { font-family:'Segoe UI',system-ui,sans-serif; background:#f0f9ff; color:#1
 .type-other { background:#f1f5f9; color:#64748b; }
 
 /* Botones acción */
-.btn-view-data {
-  background:#eff6ff; color:#2563eb; border:1px solid #bfdbfe;
+.btn-view-data, .btn-hist-data {
   border-radius:7px; padding:4px 12px; font-size:.8rem;
   font-weight:600; transition:all .2s; white-space:nowrap;
+  border-width:1px; border-style:solid;
+}
+.btn-view-data {
+  background:#eff6ff; color:#2563eb; border-color:#bfdbfe;
 }
 .btn-view-data:hover { background:#dbeafe; }
+.btn-hist-data {
+  background:#f0fdf4; color:#15803d; border-color:#bbf7d0;
+}
+.btn-hist-data:hover { background:#dcfce7; }
 
 /* Estación actual en progreso */
 .sena-current-station {
