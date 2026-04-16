@@ -136,15 +136,21 @@ def yt_id(url):
 
 
 def is_js_page(html):
-    """Detecta si la página necesita JS para mostrar contenido."""
-    if len(html) < 4000:
+    """Detecta si la página devolvió HTML vacío / solo shell JS."""
+    if not html or len(html) < 2000:
         return True
+    # Señales fuertes de SPA sin contenido
     for sig in JS_SIGNALS:
         if sig in html:
             return True
-    soup = BeautifulSoup(html, "lxml")
-    body_text = soup.get_text(separator=" ", strip=True)
-    return len(body_text) < 400
+    soup = BeautifulSoup(html[:80000], "lxml")
+    body = soup.body
+    if not body:
+        return True
+    body_text = body.get_text(separator=" ", strip=True)
+    # Texto muy corto Y pocas etiquetas de contenido = SPA shell
+    content_tags = len(body.find_all(["article","p","h1","h2","h3","li","td"]))
+    return len(body_text) < 300 and content_tags < 5
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -457,10 +463,173 @@ def extract_images(soup, base):
 
 
 # ─────────────────────────────────────────────────────────────────
-#  SELENIUM (páginas con JS / CAPTCHA)
+#  CAPAS DE FETCH — del más ligero al más potente
 # ─────────────────────────────────────────────────────────────────
 
-def scrape_with_browser(url, headless=True, wait=6):
+# UA pool para rotación
+_UA_POOL = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+]
+
+def _random_ua():
+    try:
+        from fake_useragent import UserAgent
+        return UserAgent().chrome
+    except Exception:
+        import random
+        return random.choice(_UA_POOL)
+
+def _build_headers(url=""):
+    """Cabeceras completas tipo navegador real."""
+    ua = _random_ua()
+    parsed = urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.netloc else ""
+    h = {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-CH-UA": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Upgrade-Insecure-Requests": "1",
+        "Connection": "keep-alive",
+    }
+    if origin:
+        h["Referer"] = origin + "/"
+    return h
+
+
+# ── Tier 1: requests estándar con headers robustos ────────────────
+def _fetch_requests(url):
+    sess = requests.Session()
+    sess.headers.update(_build_headers(url))
+    resp = sess.get(url, timeout=20, allow_redirects=True)
+    resp.raise_for_status()
+    return resp.text, resp.url
+
+
+# ── Tier 2: curl_cffi — TLS fingerprint como Chrome real ─────────
+def _fetch_curl(url):
+    from curl_cffi import requests as creq
+    resp = creq.get(
+        url, impersonate="chrome124",
+        headers=_build_headers(url),
+        timeout=25, allow_redirects=True,
+    )
+    resp.raise_for_status()
+    return resp.text, resp.url
+
+
+# ── Tier 3: cloudscraper — bypass Cloudflare JS Challenge ─────────
+def _fetch_cloudscraper(url):
+    import cloudscraper
+    scraper = cloudscraper.create_scraper(
+        browser={"browser": "chrome", "platform": "windows", "mobile": False}
+    )
+    scraper.headers.update(_build_headers(url))
+    resp = scraper.get(url, timeout=30, allow_redirects=True)
+    resp.raise_for_status()
+    return resp.text, resp.url
+
+
+# ── Tier 4: Reddit API JSON ───────────────────────────────────────
+def _is_reddit(url):
+    return re.search(r"(reddit\.com|redd\.it)", url, re.I)
+
+def _fetch_reddit(url):
+    """Usa la API JSON de Reddit para extraer posts."""
+    parsed = urlparse(url)
+    # Normalizar: extraer solo el host reddit.com y el path
+    path = parsed.path.rstrip("/") or ""
+    # Construir JSON endpoint: https://www.reddit.com/<path>.json
+    if path:
+        json_url = f"https://www.reddit.com{path}.json?limit=50&raw_json=1"
+    else:
+        json_url = "https://www.reddit.com/.json?limit=50&raw_json=1"
+    headers = {**_build_headers(url), "Accept": "application/json"}
+    resp = requests.get(json_url, headers=headers, timeout=20)
+    resp.raise_for_status()
+    return resp.json(), json_url
+
+def _reddit_json_to_html(data, base_url):
+    """Convierte la respuesta JSON de Reddit a HTML parseable."""
+    try:
+        # Puede ser lista [listing, comments] o un solo listing
+        listing = data[0] if isinstance(data, list) else data
+        posts = listing.get("data", {}).get("children", [])
+        parts = [f'<html><head><title>Reddit</title></head><body>']
+        for child in posts:
+            d = child.get("data", {})
+            title   = d.get("title", "")
+            link    = d.get("url", "")
+            selfurl = f"https://www.reddit.com{d.get('permalink','')}"
+            thumb   = d.get("thumbnail", "")
+            score   = d.get("score", 0)
+            sub     = d.get("subreddit_name_prefixed", "")
+            preview_img = ""
+            try:
+                preview_img = d["preview"]["images"][0]["source"]["url"].replace("&amp;","&")
+            except Exception:
+                pass
+            img_tag = f'<img src="{preview_img or thumb}" />' if (preview_img or thumb) not in ("self","default","","nsfw") else ""
+            parts.append(
+                f'<article>'
+                f'{img_tag}'
+                f'<h2><a href="{selfurl}">{title}</a></h2>'
+                f'<p class="reddit-meta">{sub} · {score} pts</p>'
+                f'</article>'
+            )
+        parts.append("</body></html>")
+        return "\n".join(parts), base_url
+    except Exception as e:
+        return f"<html><body><p>Error parsing Reddit JSON: {e}</p></body></html>", base_url
+
+
+# ── Tier 5: undetected-chromedriver (stealth headless) ────────────
+def _fetch_undetected(url, headless=True, wait=8):
+    try:
+        import undetected_chromedriver as uc
+        opts = uc.ChromeOptions()
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--window-size=1280,900")
+        opts.add_argument(f"--user-agent={_random_ua()}")
+        if headless:
+            opts.add_argument("--headless=new")
+        drv = uc.Chrome(options=opts, use_subprocess=True)
+        drv.set_page_load_timeout(45)
+        try:
+            drv.get(url)
+            time.sleep(wait)
+            # scroll para activar lazy-load
+            drv.execute_script("window.scrollTo(0, document.body.scrollHeight/2)")
+            time.sleep(2)
+            drv.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(2)
+            html = drv.page_source
+            final = drv.current_url
+        finally:
+            try: drv.quit()
+            except Exception: pass
+        return html, final, None
+    except ImportError:
+        return None, url, "undetected-chromedriver no disponible."
+    except Exception as e:
+        return None, url, f"[uc] {e}"
+
+
+# ── Tier 6: Selenium estándar con máximo stealth ──────────────────
+def _fetch_selenium(url, headless=True, wait=7):
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
@@ -473,29 +642,47 @@ def scrape_with_browser(url, headless=True, wait=6):
         opts.add_argument("--no-sandbox")
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--disable-extensions")
+        opts.add_argument("--window-size=1280,900")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
         opts.add_experimental_option("useAutomationExtension", False)
-        opts.add_argument(f"user-agent={HEADERS['User-Agent']}")
+        opts.add_argument(f"--user-agent={_random_ua()}")
 
-        drv = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=opts
-        )
+        drv = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=opts)
+        drv.set_page_load_timeout(45)
         drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+            "source": (
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
+                "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});"
+                "Object.defineProperty(navigator,'languages',{get:()=>['es-ES','es','en']});"
+            )
         })
-        drv.get(url)
-        time.sleep(wait)
-        if not headless:
-            print("[Selenium] Navegador abierto. Resuelve el CAPTCHA si aparece...")
-            time.sleep(15)
-        html = drv.page_source
-        final_url = drv.current_url
-        drv.quit()
+        try:
+            drv.get(url)
+            time.sleep(wait)
+            if not headless:
+                print("[Selenium] Resuelve el CAPTCHA si aparece...")
+                time.sleep(15)
+            drv.execute_script("window.scrollTo(0, document.body.scrollHeight/2)")
+            time.sleep(2)
+            html      = drv.page_source
+            final_url = drv.current_url
+        finally:
+            try: drv.quit()
+            except Exception: pass
         return html, final_url, None
     except ImportError:
         return None, url, "Selenium no instalado."
     except Exception as e:
         return None, url, str(e)
+
+
+# ── Legado — nombre que ya usan otros módulos ─────────────────────
+def scrape_with_browser(url, headless=True, wait=7):
+    html, final, err = _fetch_undetected(url, headless=headless, wait=wait)
+    if html and len(html) > 500:
+        return html, final, err
+    return _fetch_selenium(url, headless=headless, wait=wait)
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -789,40 +976,81 @@ def extract_all_links(soup, base_url):
 # ─────────────────────────────────────────────────────────────────
 
 def scrape_url(url, use_browser=False, headless=True):
+    """
+    Estrategia de 6 capas:
+      L1 → requests (headers robustos)
+      L2 → curl_cffi (TLS fingerprint Chrome)
+      L3 → cloudscraper (bypass Cloudflare)
+      L4 → Reddit JSON API  (solo reddit.com)
+      L5 → undetected-chromedriver (stealth headless)
+      L6 → Selenium clásico como último recurso
+    """
     html, final_url, browser_err = None, url, None
-    needs_js = False
+    fetch_method  = "requests"
+    needs_js      = False
+    site_specific = False   # si usamos handler especializado, no intentar capas genéricas
 
-    # 1) Intentar con requests primero
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20, allow_redirects=True)
-        resp.raise_for_status()
-        html = resp.text
-        final_url = resp.url
-    except requests.exceptions.ConnectionError:
-        return {"error": "No se pudo conectar. Verifica que la URL sea correcta."}
-    except requests.exceptions.Timeout:
-        return {"error": "La página tardó demasiado (timeout). Intenta con Modo Avanzado."}
-    except requests.exceptions.HTTPError as e:
-        code = e.response.status_code
-        if code == 403:
-            return {"error": f"Acceso denegado (403). Activa el Modo Avanzado (Selenium)."}
-        if code == 404:
-            return {"error": "Página no encontrada (404). Verifica la URL."}
-        return {"error": f"Error HTTP {code}."}
-    except requests.exceptions.RequestException as e:
-        return {"error": str(e)}
+    # ── L0 especial: Reddit API JSON ──────────────────────────────
+    if _is_reddit(url):
+        try:
+            rdata, final_url = _fetch_reddit(url)
+            html, final_url  = _reddit_json_to_html(rdata, final_url)
+            fetch_method     = "reddit-api"
+            site_specific    = True
+        except Exception as e:
+            browser_err = f"Reddit API falló ({e}), intentando otras capas…"
 
-    # 2) Detectar si necesita JS
-    needs_js = is_js_page(html)
+    if not site_specific:
+        # ── L1: requests con headers robustos ─────────────────────
+        try:
+            html, final_url = _fetch_requests(url)
+            fetch_method = "requests"
+        except requests.exceptions.ConnectionError:
+            return {"error": "No se pudo conectar. Verifica la URL."}
+        except requests.exceptions.Timeout:
+            pass
+        except requests.exceptions.HTTPError as e:
+            code = e.response.status_code
+            if code == 404:
+                return {"error": "Página no encontrada (404). Verifica la URL."}
+        except Exception:
+            pass
 
-    # 3) Si el usuario pidió Selenium O la página necesita JS → usar browser
-    if use_browser or needs_js:
-        html_b, final_url_b, browser_err = scrape_with_browser(
-            url, headless=headless, wait=7
-        )
-        if html_b and len(html_b) > len(html):
-            html = html_b
-            final_url = final_url_b
+        # ── L2: curl_cffi — TLS fingerprint Chrome ────────────────
+        if not html or is_js_page(html):
+            try:
+                html_c, url_c = _fetch_curl(url)
+                if html_c and len(html_c) > (len(html) if html else 0):
+                    html, final_url, fetch_method = html_c, url_c, "curl_cffi"
+            except Exception:
+                pass
+
+        # ── L3: cloudscraper — Cloudflare JS Challenge ────────────
+        if not html or is_js_page(html):
+            try:
+                html_cs, url_cs = _fetch_cloudscraper(url)
+                if html_cs and len(html_cs) > (len(html) if html else 0):
+                    html, final_url, fetch_method = html_cs, url_cs, "cloudscraper"
+            except Exception:
+                pass
+
+        # ── L4/L5: browser (si el usuario lo pide O sigue siendo SPA) ──
+        needs_js = not html or is_js_page(html)
+        if use_browser or needs_js:
+            html_b, url_b, err_b = _fetch_undetected(url, headless=headless, wait=8)
+            if html_b and len(html_b) > (len(html) if html else 0):
+                html, final_url, fetch_method = html_b, url_b, "undetected-chrome"
+                browser_err = err_b
+            if not html or (is_js_page(html) and not use_browser):
+                # Último recurso: Selenium clásico
+                html_b2, url_b2, err_b2 = _fetch_selenium(url, headless=headless, wait=7)
+                if html_b2 and len(html_b2) > (len(html) if html else 0):
+                    html, final_url, fetch_method = html_b2, url_b2, "selenium"
+                    browser_err = err_b2
+
+    if not html:
+        return {"error": "No se pudo obtener el contenido de la página. "
+                         "Activa el Modo Avanzado o verifica la URL."}
 
     try:
         soup = BeautifulSoup(html, "lxml")
@@ -864,20 +1092,21 @@ def scrape_url(url, use_browser=False, headless=True):
     images = images_dom
 
     result = {
-        "title":       page_title,
-        "description": description,
-        "url":         final_url,
-        "page_type":   page_type,
-        "metadata":    metadata,
-        "news":        news,
-        "videos":      videos,
-        "embeds":      embeds,
-        "tables":      tables,
-        "files":       files,
-        "images":      images,
-        "audio":       audio,
-        "all_links":   all_links,
-        "needed_js":   needs_js,
+        "title":        page_title,
+        "description":  description,
+        "url":          final_url,
+        "page_type":    page_type,
+        "metadata":     metadata,
+        "news":         news,
+        "videos":       videos,
+        "embeds":       embeds,
+        "tables":       tables,
+        "files":        files,
+        "images":       images,
+        "audio":        audio,
+        "all_links":    all_links,
+        "needed_js":    needs_js,
+        "fetch_method": fetch_method,   # qué capa funcionó
         "stats": {
             "news_count":    len(news),
             "videos_count":  len(videos),

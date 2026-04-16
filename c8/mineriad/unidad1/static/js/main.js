@@ -666,6 +666,34 @@ function openImageModal(url, alt) {
 }
 
 // ─────────────────────────────────────────────
+//  BADGE DE MÉTODO DE FETCH
+// ─────────────────────────────────────────────
+const FETCH_METHOD_INFO = {
+  'requests':          { label:'requests',           color:'#64748b', icon:'fa-bolt'         },
+  'curl_cffi':         { label:'curl_cffi (TLS)',    color:'#0891b2', icon:'fa-shield-halved' },
+  'cloudscraper':      { label:'cloudscraper (CF)',  color:'#d97706', icon:'fa-cloud-bolt'    },
+  'reddit-api':        { label:'Reddit API',         color:'#ff4500', icon:'fa-reddit'        },
+  'undetected-chrome': { label:'Chrome Stealth',     color:'#7c3aed', icon:'fa-user-secret'   },
+  'selenium':          { label:'Selenium',           color:'#16a34a', icon:'fa-robot'         },
+};
+
+function renderFetchBadge(method, neededJs) {
+  const info = FETCH_METHOD_INFO[method] || { label: method || '?', color:'#94a3b8', icon:'fa-circle-info' };
+  // Inyectar junto al título de la página
+  let badge = document.getElementById('fetchMethodBadge');
+  if (!badge) {
+    badge = document.createElement('span');
+    badge.id = 'fetchMethodBadge';
+    badge.style.cssText = 'display:inline-flex;align-items:center;gap:4px;font-size:.7rem;font-weight:600;padding:2px 9px;border-radius:20px;color:#fff;margin-left:8px;vertical-align:middle;';
+    const titleEl = document.getElementById('pageTitle');
+    if (titleEl) titleEl.after(badge);
+  }
+  badge.style.background = info.color;
+  badge.innerHTML = `<i class="fas ${info.icon}"></i>${info.label}`;
+  badge.title = `Extraído con: ${info.label}`;
+}
+
+// ─────────────────────────────────────────────
 //  RESUMEN DE PÁGINA (tipo, autor, fecha, og)
 // ─────────────────────────────────────────────
 const PAGE_TYPE_COLORS = {
@@ -846,9 +874,9 @@ async function analyze() {
 
   const loadingMsg = document.getElementById('loadingMsg');
   if (useBrowser) {
-    loadingMsg.innerHTML = '<i class="fas fa-robot me-2"></i>Abriendo navegador Chrome... (puede tardar 20 segundos)';
+    loadingMsg.innerHTML = '<i class="fas fa-user-secret me-2"></i>Modo Avanzado activado — Chrome Stealth iniciando... <span class="text-warning">(20-40 s)</span>';
   } else {
-    loadingMsg.textContent = 'Analizando la página, por favor espera...';
+    loadingMsg.innerHTML = '<i class="fas fa-shield-halved me-2"></i>Analizando… probando capas automáticas de bypass';
   }
 
   // Contador regresivo visible para modo avanzado
@@ -909,6 +937,9 @@ async function analyze() {
     document.getElementById('badgeImagenes').textContent = data.stats.images_count;
 
     scrapedData = data;   // ← guardar para export ZIP
+
+    // Badge de método de fetch
+    renderFetchBadge(data.fetch_method, data.needed_js);
 
     renderNews(data.news      || []);
     renderVideos(data.videos  || []);
