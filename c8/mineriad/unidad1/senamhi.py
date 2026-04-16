@@ -114,7 +114,64 @@ def _get_html_requests(url, timeout=20):
         return None, str(e)
 
 
-def _get_html_selenium(url, wait=6, headless=True):
+def _get_html_curl(url):
+    """curl_cffi — TLS fingerprint Chrome."""
+    try:
+        from curl_cffi import requests as creq
+        r = creq.get(url, impersonate="chrome124", headers=HEADERS, timeout=25)
+        r.raise_for_status()
+        return r.text, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _get_html_cloudscraper(url):
+    """Cloudflare bypass."""
+    try:
+        import cloudscraper
+        sc = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+        sc.headers.update(HEADERS)
+        r = sc.get(url, timeout=30)
+        r.raise_for_status()
+        return r.text, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _get_html_undetected(url, wait=10, headless=True):
+    """undetected-chromedriver stealth — mejor contra anti-bots."""
+    try:
+        import undetected_chromedriver as uc
+        opts = uc.ChromeOptions()
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--window-size=1280,900")
+        opts.add_argument(f"--user-agent={HEADERS['User-Agent']}")
+        if headless:
+            opts.add_argument("--headless=new")
+        drv = uc.Chrome(options=opts, use_subprocess=True)
+        drv.set_page_load_timeout(45)
+        try:
+            drv.get(url)
+            time.sleep(wait)
+            # scroll para activar carga de datos
+            drv.execute_script("window.scrollTo(0, document.body.scrollHeight/2)")
+            time.sleep(2)
+            drv.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(2)
+            html = drv.page_source
+        finally:
+            try: drv.quit()
+            except Exception: pass
+        return html, None
+    except Exception as e:
+        return None, str(e)
+
+
+def _get_html_selenium(url, wait=8, headless=True):
+    """Selenium clásico como último recurso."""
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.service import Service
@@ -128,26 +185,74 @@ def _get_html_selenium(url, wait=6, headless=True):
         opts.add_argument("--disable-dev-shm-usage")
         opts.add_argument("--disable-blink-features=AutomationControlled")
         opts.add_experimental_option("excludeSwitches", ["enable-automation"])
+        opts.add_experimental_option("useAutomationExtension", False)
         opts.add_argument(f"user-agent={HEADERS['User-Agent']}")
 
         drv = webdriver.Chrome(
             service=Service(ChromeDriverManager().install()), options=opts
         )
+        drv.set_page_load_timeout(45)
         drv.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-            "source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+            "source": "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
         })
-        drv.get(url)
-        time.sleep(wait)
-        html = drv.page_source
-        drv.quit()
+        try:
+            drv.get(url)
+            time.sleep(wait)
+            drv.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(3)
+            html = drv.page_source
+        finally:
+            try: drv.quit()
+            except Exception: pass
         return html, None
     except Exception as e:
         return None, str(e)
 
 
+def _fetch_senamhi_html(url):
+    """
+    Intenta obtener el HTML de una página SENAMHI probando en cascada:
+    requests → curl_cffi → cloudscraper → undetected-chrome → selenium
+    Devuelve el HTML más largo/completo que encuentre.
+    """
+    best_html, best_len = None, 0
+
+    for fn in [_get_html_requests, _get_html_curl, _get_html_cloudscraper]:
+        html, _ = fn(url)
+        if html and len(html) > best_len:
+            best_html, best_len = html, len(html)
+        if best_html and _has_data_table(best_html):
+            return best_html   # ya tiene datos, no necesitamos browser
+
+    # Si no encontramos tabla, usar browser headless
+    if not best_html or not _has_data_table(best_html):
+        html, _ = _get_html_undetected(url, wait=10)
+        if html and len(html) > best_len:
+            best_html = html
+
+    # Último recurso: Selenium
+    if not best_html or not _has_data_table(best_html):
+        html, _ = _get_html_selenium(url, wait=8)
+        if html and html:
+            best_html = html
+
+    return best_html
+
+
+def _has_data_table(html):
+    """¿El HTML tiene una tabla con más de 3 filas de datos?"""
+    if not html:
+        return False
+    soup = BeautifulSoup(html[:200000], "lxml")
+    for tbl in soup.find_all("table"):
+        if len(tbl.find_all("tr")) >= 4:
+            return True
+    return False
+
+
 # ── Obtener TODAS las estaciones del mapa global ────────────────
 
-_ALL_STATIONS_CACHE = None   # caché en memoria
+_ALL_STATIONS_CACHE = None   # caché en memoria (se invalida al reiniciar)
 
 def _load_all_stations():
     """Descarga el mapa global y extrae las 900+ estaciones."""
@@ -207,15 +312,19 @@ def get_stations(region_code, use_selenium=False):
             filtered.append({
                 "name":      st.get("nom", "Sin nombre"),
                 "code":      code,
+                "cod_old":   st.get("cod_old", code),
                 "type":      cate,
                 "type_full": STATION_TYPES.get(cate, cate),
+                "ico":       st.get("ico", "M"),
                 "lat":       str(lat),
                 "lon":       str(lon),
-                "estado":    st.get("estado", ""),
+                "estado":    st.get("estado", "DIFERIDO"),
                 "dept":      REGIONS.get(region_code, region_code),
                 "link":      (
-                    f"{SENAMHI_BASE}/main.php?dp={region_code}"
-                    f"&p=estaciones&cod={code}"
+                    f"{SENAMHI_BASE}/mapas/mapa-estaciones-2/map_red_graf.php"
+                    f"?cod={code}&estado={st.get('estado','DIFERIDO')}"
+                    f"&tipo_esta={st.get('ico','M')}&cate={cate}"
+                    f"&cod_old={st.get('cod_old', code)}"
                     if code else ""
                 ),
                 "region":    region_code,
@@ -226,63 +335,150 @@ def get_stations(region_code, use_selenium=False):
 
 # ── Descargar datos históricos de UNA estación ─────────────────
 
+def _extract_tables_from_html(html):
+    """Devuelve lista de (headers, data_rows) para todas las tablas con datos."""
+    results = []
+    if not html:
+        return results
+    soup = BeautifulSoup(html, "lxml")
+    for tbl in soup.find_all("table"):
+        rows_el = tbl.find_all("tr")
+        if len(rows_el) < 3:
+            continue
+        headers = [c.get_text(strip=True) for c in rows_el[0].find_all(["th", "td"])]
+        data_rows = []
+        for tr in rows_el[1:]:
+            row = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+            if row and any(c for c in row):
+                data_rows.append(row)
+        if len(data_rows) >= 2:
+            results.append((headers, data_rows))
+    return results
+
+
+def _extract_highcharts_data(html):
+    """
+    Extrae datos del gráfico Highcharts embebido en el HTML de SENAMHI.
+    Devuelve (headers, rows) con fechas + variables meteorológicas.
+    """
+    if not html:
+        return None, None
+
+    # Extraer categorías (fechas)
+    dates_m = re.search(r"categories\s*:\s*\[([^\]]+)\]", html)
+    if not dates_m:
+        return None, None
+    dates = re.findall(r"'([^']+)'|\"([^\"]+)\"", dates_m.group(1))
+    dates = [d[0] or d[1] for d in dates]
+    if not dates:
+        return None, None
+
+    # Extraer series de datos
+    series_raw = re.findall(
+        r'console\.log\s*\(\s*"Data\d+\s*\(([^"]+)\)"\s*,\s*\[([^\]]+)\]',
+        html
+    )
+    if not series_raw:
+        # Intentar formato alternativo: data: [1.2, 3.4, ...]
+        series_raw2 = re.findall(
+            r'name\s*:\s*["\']([^"\']+)["\'].*?data\s*:\s*\[([^\]]+)\]',
+            html, re.DOTALL
+        )
+        series_raw = [(n, d) for n, d in series_raw2]
+
+    if not series_raw:
+        return None, None
+
+    # Construir tabla
+    headers = ["Fecha"]
+    series_data = []
+    for name, data_str in series_raw:
+        values = []
+        for v in data_str.split(","):
+            v = v.strip()
+            try:
+                values.append(str(round(float(v), 1)) if v not in ("", "null", "None") else "—")
+            except Exception:
+                values.append("—")
+        series_data.append(values)
+        headers.append(name.strip())
+
+    rows = []
+    for i, date in enumerate(dates):
+        row = [date]
+        for vals in series_data:
+            row.append(vals[i] if i < len(vals) else "—")
+        rows.append(row)
+
+    return headers, rows
+
+
+def _build_station_url(station):
+    """Construye la URL del popup de SENAMHI para una estación."""
+    cod     = station.get("code", "")
+    cod_old = station.get("cod_old", cod)
+    estado  = station.get("estado", "DIFERIDO")
+    ico     = station.get("ico", "M")
+    cate    = station.get("type", "CO")
+    if not cod:
+        return ""
+    return (
+        f"{SENAMHI_BASE}/mapas/mapa-estaciones-2/map_red_graf.php"
+        f"?cod={cod}&estado={estado}&tipo_esta={ico}&cate={cate}&cod_old={cod_old}"
+    )
+
+
 def get_station_data(station):
     """
-    Intenta descargar los datos de la estación.
-    Retorna (rows: list[list], headers: list, error: str|None)
+    Descarga datos de la estación desde SENAMHI.
+    1) Usa map_red_graf.php (endpoint real del mapa interactivo)
+    2) Extrae datos del gráfico Highcharts embebido
+    3) Si no hay gráfico, intenta parsear tablas HTML
+    Retorna (rows, headers, error, source_url)
     """
-    link = station.get("link", "")
+    # Construir URL correcta del popup
+    url = _build_station_url(station)
+    if not url and station.get("link"):
+        url = station["link"]
 
-    # 1) Si hay link directo, intentar scrape de tabla
-    if link:
-        html, err = _get_html_requests(link)
+    if not url:
+        return [], [], "No hay URL disponible para esta estación.", ""
+
+    try:
+        html, err = _get_html_requests(url)
         if not html:
-            html, err = _get_html_selenium(link, wait=8)
+            html, err = _get_html_curl(url)
+        if not html:
+            return [], [], f"No se pudo obtener la página: {err}", url
 
-        if html:
-            soup = BeautifulSoup(html, "lxml")
-            for tbl in soup.find_all("table"):
-                rows = tbl.find_all("tr")
-                if len(rows) < 3:
-                    continue
-                headers = [th.get_text(strip=True)
-                           for th in (rows[0].find_all(["th", "td"]))]
-                data_rows = []
-                for tr in rows[1:]:
-                    row = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                    if row and any(c for c in row):
-                        data_rows.append(row)
-                if data_rows:
-                    return data_rows, headers, None
+        # 1) Intentar extraer datos del gráfico Highcharts (fuente más rica)
+        headers, rows = _extract_highcharts_data(html)
+        if rows and len(rows) >= 5:
+            return rows, headers, None, url
 
-    # 2) Intentar endpoint genérico de descarga de datos históricos
-    # SENAMHI tiene un portal de datos con parámetros GET
-    code = station.get("code", "")
-    region = station.get("region", "")
-    if code:
-        candidate_urls = [
-            f"{SENAMHI_BASE}/main.php?dp={region}&p=estaciones&est={code}",
-            f"{SENAMHI_BASE}/?p=data-historica&est={code}",
-        ]
-        for url in candidate_urls:
-            html, _ = _get_html_requests(url)
-            if html:
-                soup = BeautifulSoup(html, "lxml")
-                for tbl in soup.find_all("table"):
-                    rows = tbl.find_all("tr")
-                    if len(rows) < 3:
-                        continue
-                    headers = [th.get_text(strip=True)
-                               for th in rows[0].find_all(["th", "td"])]
-                    data_rows = [
-                        [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-                        for tr in rows[1:]
-                        if tr.find_all(["td", "th"])
-                    ]
-                    if data_rows:
-                        return data_rows, headers, None
+        # 2) Intentar tablas HTML normales
+        tables = _extract_tables_from_html(html)
+        if tables:
+            headers, rows = max(tables, key=lambda t: len(t[1]))
+            if len(rows) >= 2:
+                return rows, headers, None, url
 
-    return [], [], "No se encontraron datos para esta estación."
+        # 3) Intentar con browser si el HTML no tiene datos
+        html_b, _ = _get_html_undetected(url, wait=8)
+        if html_b:
+            headers, rows = _extract_highcharts_data(html_b)
+            if rows and len(rows) >= 2:
+                return rows, headers, None, url
+            tables = _extract_tables_from_html(html_b)
+            if tables:
+                headers, rows = max(tables, key=lambda t: len(t[1]))
+                if len(rows) >= 2:
+                    return rows, headers, None, url
+
+        return [], [], "Datos protegidos por CAPTCHA o no disponibles públicamente.", url
+
+    except Exception as e:
+        return [], [], str(e), url
 
 
 def station_data_to_csv(rows, headers, station_name):
@@ -324,7 +520,7 @@ def run_senamhi_task(task_id, stations, region_name):
                 task["progress"] = int(done / total * 95)
 
                 try:
-                    rows, headers, err = get_station_data(st)
+                    rows, headers, err, _src = get_station_data(st)
                     if rows:
                         _, csv_name = station_data_to_csv(rows, headers, st["name"])
                         zf.write(DOWNLOAD_DIR / csv_name, f"datos/{csv_name}")

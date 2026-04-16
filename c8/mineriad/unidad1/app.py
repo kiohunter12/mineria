@@ -4,7 +4,7 @@ from scraper import (scrape_url, download_file, scrape_full_article,
                      PDF_TASKS, start_compile_news,
                      DOC_ZIP_TASKS, start_docs_zip)
 from senamhi import (get_stations, start_senamhi_task,
-                     SENAMHI_TASKS, REGIONS)
+                     SENAMHI_TASKS, REGIONS, get_station_data)
 from pathlib import Path
 import re
 
@@ -36,6 +36,23 @@ def senamhi_stations():
     if err and not stations:
         return jsonify({'error': err}), 500
     return jsonify({'stations': stations, 'region_name': REGIONS[region], 'warning': err})
+
+
+@app.route('/senamhi/station-data', methods=['POST'])
+def senamhi_station_data():
+    data = request.get_json()
+    if not data or 'station' not in data:
+        return jsonify({'error': 'Datos de estación requeridos'}), 400
+    rows, headers, err, source_url = get_station_data(data['station'])
+    if err and not rows:
+        return jsonify({'error': err, 'rows': [], 'headers': []})
+    return jsonify({
+        'rows':       rows,
+        'headers':    headers,
+        'total_rows': len(rows),
+        'source_url': source_url,
+        'warning':    err,
+    })
 
 
 @app.route('/senamhi/download-all', methods=['POST'])

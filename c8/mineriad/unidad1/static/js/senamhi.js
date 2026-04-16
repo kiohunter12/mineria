@@ -163,49 +163,90 @@ async function verDatos(idx) {
   document.getElementById('stationDataContent').classList.add('d-none');
   document.getElementById('stationDataEmpty').classList.add('d-none');
   document.getElementById('btnDownloadSingle').classList.add('d-none');
+
+  // Mensaje de espera más informativo (el browser stealth tarda)
+  document.querySelector('#stationDataSpinner p').textContent =
+    'Obteniendo datos... (puede tardar hasta 30 segundos)';
   show('stationDataSpinner');
 
   bootstrap.Modal.getOrCreateInstance(document.getElementById('stationDataModal')).show();
 
-  // Usar la ruta de scrape normal con la URL de la estación
   try {
-    const url = st.link || `https://www.senamhi.gob.pe/main.php?dp=${st.region}&p=estaciones`;
-    const res  = await fetch('/scrape', {
-      method: 'POST',
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 60000);   // 60s timeout
+
+    const res = await fetch('/senamhi/station-data', {
+      method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, use_browser: false }),
+      body:    JSON.stringify({ station: st }),
+      signal:  ctrl.signal,
     });
+    clearTimeout(t);
     const data = await res.json();
     hide('stationDataSpinner');
 
-    if (data.tables && data.tables.length > 0) {
-      const tbl = data.tables[0];
-      singleCsvData = { headers: tbl.headers, rows: tbl.rows, name: st.name };
+    if (data.error && !data.rows?.length) {
+      // Mostrar error + botón para abrir en nueva pestaña
+      document.getElementById('stationDataEmpty').innerHTML = `
+        <i class="fas fa-database fs-1 d-block mb-2"></i>
+        <p>${escHtml(data.error)}</p>
+        ${st.link ? `<a href="${escHtml(st.link)}" target="_blank" rel="noopener"
+          class="btn btn-sm btn-outline-primary mt-1">
+          <i class="fas fa-external-link-alt me-1"></i>Abrir en SENAMHI
+        </a>` : ''}`;
+      show('stationDataEmpty');
+      return;
+    }
 
-      // Renderizar tabla
-      const thHtml = tbl.headers.length
-        ? '<tr>' + tbl.headers.map(h => `<th class="bg-light">${escHtml(h)}</th>`).join('') + '</tr>'
+    if (data.rows && data.rows.length > 0) {
+      singleCsvData = { headers: data.headers, rows: data.rows, name: st.name };
+
+      const thHtml = data.headers.length
+        ? '<tr>' + data.headers.map(h => `<th class="bg-light">${escHtml(h)}</th>`).join('') + '</tr>'
         : '';
-      const tdHtml = tbl.rows.slice(0, 100).map(row =>
+      const tdHtml = data.rows.slice(0, 200).map(row =>
         '<tr>' + row.map(c => `<td>${escHtml(c)}</td>`).join('') + '</tr>'
       ).join('');
 
+      const sourceInfo = data.source_url
+        ? `<a href="${escHtml(data.source_url)}" target="_blank" rel="noopener"
+             class="text-muted text-decoration-none small ms-2">
+             <i class="fas fa-external-link-alt me-1"></i>Ver fuente
+           </a>`
+        : '';
+
       document.getElementById('stationDataTable').innerHTML = `
         <p class="text-muted small mb-2">
-          Mostrando ${Math.min(tbl.rows.length, 100)} de ${tbl.total_rows} registros
+          Mostrando ${Math.min(data.rows.length, 200)} de ${data.total_rows} registros
+          ${sourceInfo}
+          ${data.warning ? `<span class="badge bg-warning text-dark ms-2">${escHtml(data.warning)}</span>` : ''}
         </p>
         <table class="table table-sm table-bordered table-hover" style="font-size:.82rem;">
-          <thead>${thHtml}</thead>
+          <thead class="table-dark">${thHtml}</thead>
           <tbody>${tdHtml}</tbody>
         </table>`;
 
       show('stationDataContent');
       document.getElementById('btnDownloadSingle').classList.remove('d-none');
     } else {
+      document.getElementById('stationDataEmpty').innerHTML = `
+        <i class="fas fa-database fs-1 d-block mb-2"></i>
+        <p>No se encontraron datos tabulares para esta estación.</p>
+        ${st.link ? `<a href="${escHtml(st.link)}" target="_blank" rel="noopener"
+          class="btn btn-sm btn-outline-primary mt-1">
+          <i class="fas fa-external-link-alt me-1"></i>Abrir en SENAMHI
+        </a>` : ''}`;
       show('stationDataEmpty');
     }
   } catch (err) {
     hide('stationDataSpinner');
+    document.getElementById('stationDataEmpty').innerHTML = `
+      <i class="fas fa-circle-exclamation fs-1 d-block mb-2 text-danger"></i>
+      <p>${err.name === 'AbortError' ? 'Tiempo agotado (60s). La estación no respondió.' : escHtml(err.message)}</p>
+      ${st.link ? `<a href="${escHtml(st.link)}" target="_blank" rel="noopener"
+        class="btn btn-sm btn-outline-primary mt-1">
+        <i class="fas fa-external-link-alt me-1"></i>Abrir en SENAMHI directamente
+      </a>` : ''}`;
     show('stationDataEmpty');
   }
 }
